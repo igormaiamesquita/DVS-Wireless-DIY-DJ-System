@@ -61,9 +61,18 @@ MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
 const float TARGET_VEL  = -12.0;
 const float NOMINAL_VEL = TARGET_VEL;
 
-// ---- Comportamento do prato (knobs do v7) ----
-const float RAMP_RATE = 4.0;     // rad/s por segundo: quao gradual sobe de volta
+// ---- Comportamento do prato (knobs) ----
+const float RAMP_RATE = 3.0;     // rad/s por segundo: quao gradual sobe de volta (menor = mais suave)
 const float DEADBAND  = 2.0;     // folga antes do motor ceder
+
+// ---- TORQUE / CALOR (knobs principais contra superaquecimento) ----
+// V_RUN  : torque (em Volts) quando o prato esta livre. Mantem o giro.
+//          Mais baixo = esquenta menos e "puxa de volta" mais suave.
+//          Se nao der partida no prato, suba aos poucos (ex: 2.4, 2.8).
+// V_YIELD: torque quando VOCE intervem (segura / freia / puxa pro reverso).
+//          Bem baixo de proposito: o motor LARGA o prato, nao briga, nao esquenta.
+const float V_RUN   = 2.0;
+const float V_YIELD = 0.6;
 
 // =====================================================
 // Hall / crossfader
@@ -175,7 +184,9 @@ void gerarSampleTeste() {
 
     if (v > 1.0f)  v = 1.0f;
     if (v < -1.0f) v = -1.0f;
-    gSample[i] = (int16_t)(v * 12000.0f);
+    // nivel digital mais quente (~85% do fundo de escala) -> da pra baixar o
+    // ganho do PAM8403 e o chiado some. (com OUTPUT_GAIN 0.90 -> pico ~24800)
+    gSample[i] = (int16_t)(v * 27500.0f);
   }
 
   Serial.printf("Sample de teste: %d frames (%.2fs) na PSRAM\n",
@@ -323,9 +334,9 @@ void setup() {
   motor.linkDriver(&driver);
 
   motor.controller = MotionControlType::velocity;
-  motor.voltage_limit = 3.0;
+  motor.voltage_limit = V_RUN;             // teto de torque (ajustado em runtime no loop)
   motor.PID_velocity.P = 0.15;
-  motor.PID_velocity.I = 0.3;
+  motor.PID_velocity.I = 0.2;              // menos I -> menos windup/calor ao segurar
   motor.PID_velocity.output_ramp = 100;   // o slew real eh feito pelo setpoint
   motor.LPF_velocity.Tf = 0.05;
 
@@ -353,19 +364,26 @@ void loop() {
 
   float v = motor.shaftVelocity();         // velocidade real (com sinal)
 
-  // ---- setpoint que escorrega (sensacao de vinil) ----
+  // ---- setpoint que escorrega + controle de torque (sensacao de vinil, sem calor) ----
   float dir    = (TARGET_VEL < 0) ? -1.0f : 1.0f;
-  float vDir   = v * dir;
+  float vDir   = v * dir;                  // velocidade real no sentido do alvo
   float setDir = setVel * dir;
   float tgtDir = fabs(TARGET_VEL);
 
+  // Voce esta intervindo? (prato caiu abaixo do setpoint = segurando/freando/revertendo)
   if (vDir < setDir - DEADBAND) {
-    setDir = vDir + DEADBAND;              // prato freado -> setpoint cede
+    // MOTOR CEDE: segue a velocidade real (erro ~0 -> torque minimo),
+    // baixa o teto de torque e zera o integral -> nao briga, nao esquenta.
+    setDir = vDir;
+    motor.voltage_limit = V_YIELD;
+    motor.PID_velocity.reset();
   } else {
-    setDir += RAMP_RATE * dt;             // livre -> sobe devagar ate o alvo
+    // LIVRE: sobe de volta devagar ate o alvo, com torque normal (ja baixo).
+    setDir += RAMP_RATE * dt;
     if (setDir > tgtDir) setDir = tgtDir;
+    motor.voltage_limit = V_RUN;
   }
-  if (setDir < 0) setDir = 0;
+  if (setDir < 0) setDir = 0;              // nunca pede pra girar ao contrario do nominal
 
   setVel = setDir * dir;
   motor.move(setVel);
