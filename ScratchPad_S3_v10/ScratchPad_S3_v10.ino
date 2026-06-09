@@ -51,8 +51,9 @@ const float DEADBAND  = 2.0;       // folga antes do motor "ceder" ao seu toque
 
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
 float MOTOR_TORQUE   = 3.0;   // FORCA DO MOTOR (volts). Maior = mais forte/firme. Tipico 2-6.
-float SCRATCH_FILTRO = 0.01;  // RESPOSTA do scratch. Menor = mais rapido/cru. 0.005 a 0.05
-float SCRATCH_PARADA = 0.05;  // som PARA com o prato quase parado. Maior = para mais facil
+float SCRATCH_PITCH  = 1.0;   // afinacao de TOM (1.0 = normal). Sobe se sair grave, desce se agudo
+float SCRATCH_PARADA = 0.02;  // congela o som qdo o prato esta quase parado (anti-ruido)
+float MOTOR_FILTRO   = 0.02;  // suavidade do controle do motor (nao afeta o tom). 0.01 a 0.05
 float VOLUME_MESTRE  = 0.90;  // volume geral (0.0 a ~1.2)
 // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
@@ -113,7 +114,12 @@ const float MAX_RATIO_REV = 3.00f;
 int16_t* gSample = nullptr;
 int32_t  gSampleLen = 0;
 volatile bool gAudioReady = false;     // false durante troca de sample -> silencio
-volatile int32_t scratchPos = 0;       // ponto-fixo (8 bits de fracao)
+volatile int32_t scratchPos = 0;       // (legado, nao usado no position-lock)
+
+// --- POSITION-LOCK: audio colado na POSICAO do prato (agulha fixa) ---
+const double FRAMES_PER_RAD = (double)SAMPLE_RATE / NOMINAL_VEL;  // 1.0x no giro nominal
+portMUX_TYPE posMux = portMUX_INITIALIZER_UNLOCKED;
+volatile double gScratchTarget = 0.0;  // posicao do prato em frames (cumulativo)
 
 // =====================================================
 // Lista de arquivos /scratch
@@ -325,23 +331,39 @@ void audioTask(void *param) {
       continue;
     }
 
-    float sf  = gSpeedFactor;
     bool  mute = gCut || gMuteScratch;
     float vol = gVol;
 
-    if (sf >  MAX_RATIO_FWD) sf =  MAX_RATIO_FWD;
-    if (sf < -MAX_RATIO_REV) sf = -MAX_RATIO_REV;
-    if (fabsf(sf) < SCRATCH_PARADA) sf = 0.0f;   // prato quase parado -> som para
-    int32_t step = (int32_t)(sf * 256.0f);
+    // POSITION-LOCK: integra EXATAMENTE quanto o prato moveu neste bloco.
+    // Sem catch-up (nao acelera), sem filtro/deadzone (agulha fica fixa).
+    portENTER_CRITICAL(&posMux);
+    double target = gScratchTarget;
+    portEXIT_CRITICAL(&posMux);
 
-    int32_t pos = scratchPos;
+    static double playPos = 0.0;
+    static double lastTarget = 0.0;
+    static bool aInit = false;
+    if (!aInit) { lastTarget = target; aInit = true; }
+
+    double step = (target - lastTarget) / FRAMES;   // avanco real do prato por amostra
+    lastTarget = target;
+
+    if (fabs(step) < SCRATCH_PARADA) step = 0.0;     // quase parado -> congela (anti-ruido)
+    const double MAXSTEP = 32.0;                      // teto so p/ glitch (32x)
+    if (step >  MAXSTEP) step =  MAXSTEP;
+    if (step < -MAXSTEP) step = -MAXSTEP;
+
     for (int i = 0; i < FRAMES; i++) {
-      pos = wrapPos(pos + step);
-      int16_t s = mute ? 0 : (int16_t)(interpMono(pos) * vol);
+      playPos += step;
+      long idx = (long)floor(playPos);
+      long m = idx % gSampleLen; if (m < 0) m += gSampleLen;
+      long n = m + 1; if (n >= gSampleLen) n = 0;
+      double frac = playPos - floor(playPos);
+      float sv = gSample[m] + (gSample[n] - gSample[m]) * frac;
+      int16_t s = mute ? 0 : (int16_t)(sv * vol);
       buffer[i * 2]     = s;
       buffer[i * 2 + 1] = s;
     }
-    scratchPos = pos;
 
     size_t written;
     i2s_write(I2S_NUM_0, buffer, sizeof(buffer), &written, portMAX_DELAY);
@@ -395,7 +417,7 @@ void setup() {
   motor.PID_velocity.P = 0.15;
   motor.PID_velocity.I = 0.2;
   motor.PID_velocity.output_ramp = 100;
-  motor.LPF_velocity.Tf = SCRATCH_FILTRO;   // <- resposta do scratch (topo do codigo)
+  motor.LPF_velocity.Tf = MOTOR_FILTRO;     // <- suavidade do motor (topo do codigo)
 
   motor.init();
   motor.initFOC();
@@ -501,7 +523,18 @@ void loop() {
   setVel = setDir * dir;
   motor.move(setVel);
 
-  gSpeedFactor = v / NOMINAL_VEL;
+  // POSITION-LOCK: integra o ANGULO real do prato (sem filtro = resposta imediata)
+  static float lastAngle = 0.0f;
+  static bool angInit = false;
+  float ang = motor.shaftAngle();
+  if (!angInit) { lastAngle = ang; angInit = true; }
+  float dA = ang - lastAngle;
+  lastAngle = ang;
+  portENTER_CRITICAL(&posMux);
+  gScratchTarget += (double)dA * FRAMES_PER_RAD * SCRATCH_PITCH;
+  portEXIT_CRITICAL(&posMux);
+
+  gSpeedFactor = v / NOMINAL_VEL;   // so p/ debug
 
   // debug: confirma se o prato gira (v = velocidade real)
   static uint32_t tDbg = 0;
