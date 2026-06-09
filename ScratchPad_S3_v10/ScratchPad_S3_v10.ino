@@ -184,7 +184,13 @@ int16_t* loadWavToPSRAM(const char* path, int32_t* lenOut) {
   int32_t len = (channels == 2) ? totalSamples / 2 : totalSamples;
 
   int16_t* buf = (int16_t*)heap_caps_malloc(len * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-  if (!buf) { Serial.println("Sem PSRAM."); f.close(); return nullptr; }
+  if (!buf) {
+    Serial.printf("Sample grande demais: precisa %d KB, livre na PSRAM %d KB.\n",
+                  (int)(len * 2 / 1024),
+                  (int)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
+    Serial.println("Use WAV mais curto (16-bit MONO 22050 Hz).");
+    f.close(); return nullptr;
+  }
 
   if (channels == 2) {
     int16_t st[2];
