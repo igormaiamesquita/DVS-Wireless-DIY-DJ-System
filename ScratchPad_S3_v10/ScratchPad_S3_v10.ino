@@ -295,8 +295,8 @@ void audioTask(void *param) {
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 8,
-    .dma_buf_len = 512,
+    .dma_buf_count = 4,     // fila de DMA MENOR = MUITO menos delay no scratch
+    .dma_buf_len = 128,     // 4*128 = 512 amostras = ~23ms (era 8*512 = ~186ms!)
     .use_apll = false,
     .tx_desc_auto_clear = true,
     .fixed_mclk = 0
