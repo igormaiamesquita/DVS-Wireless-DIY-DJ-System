@@ -218,8 +218,14 @@ int scanFolder(const char* dir, String* list, int maxN) {
   while (e && n < maxN) {
     if (!e.isDirectory()) {
       String nm = e.name();
-      String low = nm; low.toLowerCase();
-      if (low.endsWith(".wav")) {
+      // so o nome do arquivo (sem caminho), p/ filtrar lixo do macOS
+      String base = nm;
+      int slash = base.lastIndexOf('/');
+      if (slash >= 0) base = base.substring(slash + 1);
+
+      String low = base; low.toLowerCase();
+      // ignora ocultos/AppleDouble (._arquivo, .Spotlight...) e pega so .wav
+      if (!base.startsWith(".") && low.endsWith(".wav")) {
         list[n++] = nm.startsWith("/") ? nm : (String(dir) + "/" + nm);
       }
     }
