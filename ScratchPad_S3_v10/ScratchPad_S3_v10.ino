@@ -109,7 +109,13 @@ const float DEADZONE      = 0.015f;
 int16_t* gSample = nullptr;
 int32_t  gSampleLen = 0;
 volatile bool gAudioReady = false;     // false durante troca de sample -> silencio
-volatile int32_t scratchPos = 0;       // ponto-fixo (8 bits de fracao)
+volatile int32_t scratchPos = 0;       // (legado, nao usado no position-lock)
+
+// --- POSITION-LOCK: audio segue o ANGULO do prato (sem lag de filtro) ---
+// frames de audio por radiano do prato; no giro nominal da 1.0x
+const double FRAMES_PER_RAD = (double)SAMPLE_RATE / NOMINAL_VEL;
+portMUX_TYPE posMux = portMUX_INITIALIZER_UNLOCKED;
+volatile double gScratchTarget = 0.0;  // posicao-alvo (frames, cumulativo) vinda do prato
 
 // =====================================================
 // Lista de arquivos /scratch
@@ -321,23 +327,34 @@ void audioTask(void *param) {
       continue;
     }
 
-    float sf  = gSpeedFactor;
     bool  mute = gCut || gMuteScratch;
     float vol = gVol;
 
-    if (sf >  MAX_RATIO_FWD) sf =  MAX_RATIO_FWD;
-    if (sf < -MAX_RATIO_REV) sf = -MAX_RATIO_REV;
-    if (fabsf(sf) < DEADZONE) sf = 0.0f;
-    int32_t step = (int32_t)(sf * 256.0f);
+    // alvo de posicao vindo do prato (position-lock = sem lag de velocidade)
+    portENTER_CRITICAL(&posMux);
+    double target = gScratchTarget;
+    portEXIT_CRITICAL(&posMux);
 
-    int32_t pos = scratchPos;
+    static double playPos = 0.0;
+    double diff = target - playPos;
+    if (diff > 1e6 || diff < -1e6) { playPos = target; diff = 0.0; }  // resync seguranca
+
+    double step = diff / FRAMES;          // alcanca o alvo ate o fim do bloco
+    const double MAXSTEP = 16.0;          // teto de seguranca (16x)
+    if (step >  MAXSTEP) step =  MAXSTEP;
+    if (step < -MAXSTEP) step = -MAXSTEP;
+
     for (int i = 0; i < FRAMES; i++) {
-      pos = wrapPos(pos + step);
-      int16_t s = mute ? 0 : (int16_t)(interpMono(pos) * vol);
+      playPos += step;
+      long idx = (long)floor(playPos);
+      long m = idx % gSampleLen; if (m < 0) m += gSampleLen;
+      long n = m + 1; if (n >= gSampleLen) n = 0;
+      double frac = playPos - floor(playPos);
+      float sv = gSample[m] + (gSample[n] - gSample[m]) * frac;
+      int16_t s = mute ? 0 : (int16_t)(sv * vol);
       buffer[i * 2]     = s;
       buffer[i * 2 + 1] = s;
     }
-    scratchPos = pos;
 
     size_t written;
     i2s_write(I2S_NUM_0, buffer, sizeof(buffer), &written, portMAX_DELAY);
@@ -497,7 +514,19 @@ void loop() {
   setVel = setDir * dir;
   motor.move(setVel);
 
-  gSpeedFactor = v / NOMINAL_VEL;
+  // POSITION-LOCK: integra o angulo real do prato -> alvo de leitura do sample.
+  // Usa shaftAngle() (cru, sem o filtro de velocidade) -> resposta imediata.
+  static float lastAngle = 0.0f;
+  static bool angInit = false;
+  float ang = motor.shaftAngle();
+  if (!angInit) { lastAngle = ang; angInit = true; }
+  float dA = ang - lastAngle;
+  lastAngle = ang;
+  portENTER_CRITICAL(&posMux);
+  gScratchTarget += (double)dA * FRAMES_PER_RAD;
+  portEXIT_CRITICAL(&posMux);
+
+  gSpeedFactor = v / NOMINAL_VEL;   // so p/ debug
 
   // debug: confirma se o prato gira (v = velocidade real)
   static uint32_t tDbg = 0;
