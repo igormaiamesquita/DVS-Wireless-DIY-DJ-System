@@ -43,13 +43,18 @@ BLDCMotor motor = BLDCMotor(7);
 BLDCDriver3PWM driver = BLDCDriver3PWM(DRV_IN1, DRV_IN2, DRV_IN3);
 MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
 
-const float TARGET_VEL  = -12.0;
+const float TARGET_VEL  = -12.0;   // velocidade de giro do prato (rad/s); sinal = sentido
 const float NOMINAL_VEL = TARGET_VEL;
 
-const float RAMP_RATE = 3.0;
-const float DEADBAND  = 2.0;
-const float V_RUN     = 3.0;   // torque quando livre / arranque (subiu p/ dar partida)
-const float V_YIELD   = 0.6;   // torque quando voce intervem (cede / esfria)
+const float RAMP_RATE = 3.0;       // quao rapido o prato volta a girar depois que voce solta
+const float DEADBAND  = 2.0;       // folga antes do motor "ceder" ao seu toque
+
+// >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
+float MOTOR_TORQUE   = 3.0;   // FORCA DO MOTOR (volts). Maior = mais forte/firme. Tipico 2-6.
+float SCRATCH_FILTRO = 0.01;  // RESPOSTA do scratch. Menor = mais rapido/cru. 0.005 a 0.05
+float SCRATCH_PARADA = 0.05;  // som PARA com o prato quase parado. Maior = para mais facil
+float VOLUME_MESTRE  = 0.90;  // volume geral (0.0 a ~1.2)
+// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 // =====================================================
 // Hall / crossfader
@@ -94,14 +99,13 @@ const uint8_t BTN_PINS[6] = {18, 38, 39, 7, 45, 46};
 // =====================================================
 // Estado de audio (compartilhado)
 // =====================================================
-volatile float gVol         = 0.90f;   // volume mestre (botoes ajustam)
+volatile float gVol         = VOLUME_MESTRE;   // volume mestre (botoes ajustam em runtime)
 volatile float gSpeedFactor = 0.0f;    // ratio de reproducao (do prato)
 volatile bool  gCut         = false;   // crossfader
 volatile bool  gMuteScratch = false;   // mute manual (botao)
 
 const float MAX_RATIO_FWD = 1.10f;
 const float MAX_RATIO_REV = 3.00f;
-const float DEADZONE      = 0.015f;
 
 // =====================================================
 // Buffer do sample (PSRAM)
@@ -327,7 +331,7 @@ void audioTask(void *param) {
 
     if (sf >  MAX_RATIO_FWD) sf =  MAX_RATIO_FWD;
     if (sf < -MAX_RATIO_REV) sf = -MAX_RATIO_REV;
-    if (fabsf(sf) < DEADZONE) sf = 0.0f;
+    if (fabsf(sf) < SCRATCH_PARADA) sf = 0.0f;   // prato quase parado -> som para
     int32_t step = (int32_t)(sf * 256.0f);
 
     int32_t pos = scratchPos;
@@ -387,12 +391,11 @@ void setup() {
   motor.linkDriver(&driver);
 
   motor.controller = MotionControlType::velocity;
-  motor.voltage_limit = V_RUN;
+  motor.voltage_limit = MOTOR_TORQUE;       // <- ajuste de torque (topo do codigo)
   motor.PID_velocity.P = 0.15;
   motor.PID_velocity.I = 0.2;
   motor.PID_velocity.output_ramp = 100;
-  motor.LPF_velocity.Tf = 0.02;   // era 0.05 -> menos filtro = menos delay no scratch
-                                  // (se o motor chiar/vibrar, suba p/ 0.03)
+  motor.LPF_velocity.Tf = SCRATCH_FILTRO;   // <- resposta do scratch (topo do codigo)
 
   motor.init();
   motor.initFOC();
