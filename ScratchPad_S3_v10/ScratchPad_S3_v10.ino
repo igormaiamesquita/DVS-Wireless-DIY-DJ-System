@@ -48,7 +48,7 @@ const float NOMINAL_VEL = TARGET_VEL;
 
 const float RAMP_RATE = 3.0;
 const float DEADBAND  = 2.0;
-const float V_RUN     = 2.0;   // torque quando livre
+const float V_RUN     = 3.0;   // torque quando livre / arranque (subiu p/ dar partida)
 const float V_YIELD   = 0.6;   // torque quando voce intervem (cede / esfria)
 
 // =====================================================
@@ -480,20 +480,17 @@ void loop() {
 
   float v = motor.shaftVelocity();
 
-  // setpoint que escorrega + torque dinamico (anti-calor)
+  // setpoint que escorrega (logica ORIGINAL do v8, comprovada: da partida e cede ao segurar)
   float dir    = (TARGET_VEL < 0) ? -1.0f : 1.0f;
   float vDir   = v * dir;
   float setDir = setVel * dir;
   float tgtDir = fabs(TARGET_VEL);
 
   if (vDir < setDir - DEADBAND) {
-    setDir = vDir;
-    motor.voltage_limit = V_YIELD;
-    motor.PID_velocity.reset();
+    setDir = vDir + DEADBAND;              // prato freado -> setpoint cede (mas mantem torque p/ subir)
   } else {
-    setDir += RAMP_RATE * dt;
+    setDir += RAMP_RATE * dt;             // livre -> sobe devagar ate o alvo
     if (setDir > tgtDir) setDir = tgtDir;
-    motor.voltage_limit = V_RUN;
   }
   if (setDir < 0) setDir = 0;
 
@@ -501,6 +498,13 @@ void loop() {
   motor.move(setVel);
 
   gSpeedFactor = v / NOMINAL_VEL;
+
+  // debug: confirma se o prato gira (v = velocidade real)
+  static uint32_t tDbg = 0;
+  if (millis() - tDbg > 500) {
+    tDbg = millis();
+    Serial.printf("v=%.2f set=%.2f sf=%.2f cut=%d\n", v, setVel, gSpeedFactor, gCut);
+  }
 
   // entradas
   lerEncoder();
