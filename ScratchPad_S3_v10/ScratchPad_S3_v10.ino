@@ -85,9 +85,9 @@ SPIClass spiSD(FSPI);
 #define ENC_SW 42
 
 // =====================================================
-// Botoes (GND comum)  -- 45/46 sao strapping (nao segurar no boot)
+// Botoes (GND comum)  -- GPIO 0 e strapping (nao segurar no boot)
 // =====================================================
-const uint8_t BTN_PINS[6] = {18, 38, 39, 7, 45, 46};
+const uint8_t BTN_PINS[6] = {21, 47, 48, 14, 2, 0};
 
 // =====================================================
 // I2S / UDA1334A
