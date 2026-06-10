@@ -29,6 +29,8 @@
 #include "esp_heap_caps.h"
 #include <SPI.h>
 #include <SD.h>
+#include "freertos/stream_buffer.h"
+#include "freertos/semphr.h"
 
 // =====================================================
 // Motor / DRV8313 / AS5600
@@ -55,6 +57,7 @@ float SCRATCH_PITCH  = 1.0;   // afinacao de TOM (1.0 = normal). Sobe se sair gr
 float SCRATCH_PARADA = 0.02;  // congela o som qdo o prato esta quase parado (anti-ruido)
 float MOTOR_FILTRO   = 0.02;  // suavidade do controle do motor (nao afeta o tom). 0.01 a 0.05
 float VOLUME_MESTRE  = 0.90;  // volume geral (0.0 a ~1.2)
+float BEAT_VOL       = 0.60;  // volume da BATIDA relativo ao scratch (0.0 a 1.0)
 // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 // =====================================================
@@ -128,6 +131,25 @@ volatile double gScratchTarget = 0.0;  // posicao do prato em frames (cumulativo
 String scratchFiles[MAX_FILES];
 int    scratchCount = 0;
 int    selIndex     = 0;
+
+// =====================================================
+// Batidas /beats (streaming do SD)
+// =====================================================
+String beatFiles[MAX_FILES];
+int    beatCount = 0;
+int    beatIndex = 0;
+volatile bool  gBeatPlaying = true;        // play/pause da batida
+volatile int   gBeatReq     = 0;           // pedido: +1 = proxima, -1 = anterior
+volatile float gBeatVol     = BEAT_VOL;    // volume da batida (runtime)
+
+StreamBufferHandle_t beatStream = NULL;    // fila de audio da batida (produtor->audio)
+SemaphoreHandle_t    sdMutex    = NULL;    // serializa acesso ao SD (scratch x batida)
+
+File     beatFile;                         // arquivo da batida atual (aberto)
+bool     beatOpen     = false;
+uint16_t beatChannels = 1;
+uint32_t beatDataPos  = 0;                 // inicio do PCM no arquivo
+uint32_t beatDataEnd  = 0;                 // fim do PCM
 
 // =====================================================
 // WRAP / interpolacao
@@ -280,7 +302,9 @@ void aplicarSample(int idx) {
   Serial.printf("Carregando [%d]: %s\n", idx, scratchFiles[idx].c_str());
 
   int32_t newLen = 0;
+  if (sdMutex) xSemaphoreTake(sdMutex, portMAX_DELAY);   // nao colide com o streaming da batida
   int16_t* nb = loadWavToPSRAM(scratchFiles[idx].c_str(), &newLen);
+  if (sdMutex) xSemaphoreGive(sdMutex);
   if (!nb) { Serial.println("Falha ao carregar."); return; }
 
   gAudioReady = false;          // audioTask passa a mandar silencio
@@ -292,6 +316,103 @@ void aplicarSample(int idx) {
   gAudioReady = true;
   if (old) free(old);
   Serial.printf("OK: %d frames (%.2fs)\n", newLen, (float)newLen / SAMPLE_RATE);
+}
+
+// =====================================================
+// Abre uma batida /beats (so cabecalho; PCM fica streaming)
+// =====================================================
+bool openBeat(int idx) {
+  if (idx < 0 || idx >= beatCount) return false;
+  if (beatOpen) { beatFile.close(); beatOpen = false; }
+
+  beatFile = SD.open(beatFiles[idx].c_str(), FILE_READ);
+  if (!beatFile) { Serial.printf("Batida nao abriu: %s\n", beatFiles[idx].c_str()); return false; }
+
+  char tag[4];
+  beatFile.read((uint8_t*)tag, 4); beatFile.seek(8); beatFile.read((uint8_t*)tag, 4);
+
+  uint16_t ch = 1, bits = 16; uint32_t rate = SAMPLE_RATE, dataSize = 0, dataPos = 0;
+  while (beatFile.available()) {
+    char id[4]; if (beatFile.read((uint8_t*)id, 4) != 4) break;
+    uint8_t sb[4]; beatFile.read(sb, 4);
+    uint32_t sz = sb[0] | (sb[1] << 8) | (sb[2] << 16) | (sb[3] << 24);
+    if (memcmp(id, "fmt ", 4) == 0) {
+      uint8_t fmt[16]; beatFile.read(fmt, 16);
+      ch = fmt[2] | (fmt[3] << 8);
+      rate = fmt[4] | (fmt[5] << 8) | (fmt[6] << 16) | (fmt[7] << 24);
+      bits = fmt[14] | (fmt[15] << 8);
+      if (sz > 16) beatFile.seek(beatFile.position() + (sz - 16));
+    } else if (memcmp(id, "data", 4) == 0) {
+      dataSize = sz; dataPos = beatFile.position(); break;
+    } else {
+      beatFile.seek(beatFile.position() + sz + (sz & 1));
+    }
+  }
+  if (dataSize == 0 || bits != 16) {
+    Serial.println("Batida WAV invalida (precisa 16-bit PCM)."); beatFile.close(); return false;
+  }
+  if (rate != SAMPLE_RATE)
+    Serial.printf("AVISO: batida a %u Hz (esperado %d) -> ritmo desloca.\n", rate, SAMPLE_RATE);
+
+  beatChannels = ch; beatDataPos = dataPos; beatDataEnd = dataPos + dataSize;
+  beatFile.seek(dataPos);
+  beatOpen = true;
+  Serial.printf("Batida [%d]: %s (%uch)\n", idx, beatFiles[idx].c_str(), ch);
+  return true;
+}
+
+// =====================================================
+// TASK PRODUTORA da batida (le do SD -> fila beatStream)
+// =====================================================
+void beatTask(void *param) {
+  const int CHUNK = 512;                 // frames por leitura
+  static int16_t raw[CHUNK * 2];         // estereo cru
+  static int16_t mono[CHUNK];
+
+  for (;;) {
+    // --- pedido de troca de faixa ---
+    if (gBeatReq != 0 && beatCount > 0) {
+      int req = gBeatReq; gBeatReq = 0;
+      int ni = beatIndex + req;
+      while (ni < 0)            ni += beatCount;
+      while (ni >= beatCount)   ni -= beatCount;
+      beatIndex = ni;
+      if (sdMutex) xSemaphoreTake(sdMutex, portMAX_DELAY);
+      openBeat(beatIndex);
+      if (sdMutex) xSemaphoreGive(sdMutex);
+      // (sem reset da fila p/ evitar corrida entre tasks; ~0.27s da faixa antiga
+      //  ainda toca antes da nova - troca suave)
+      continue;
+    }
+
+    if (!gBeatPlaying || !beatOpen || beatCount == 0) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+
+    // so le se tem espaco na fila (nao bloqueia o produtor)
+    if (xStreamBufferSpacesAvailable(beatStream) < (size_t)(CHUNK * 2)) {
+      vTaskDelay(pdMS_TO_TICKS(2)); continue;
+    }
+
+    int got = 0;
+    if (sdMutex) xSemaphoreTake(sdMutex, portMAX_DELAY);
+    if (beatChannels == 2) {
+      uint32_t left = beatDataEnd - beatFile.position();
+      uint32_t want = CHUNK * 4; if (want > left) want = left;
+      int n = beatFile.read((uint8_t*)raw, want);
+      int fr = n / 4;
+      for (int i = 0; i < fr; i++) mono[i] = (int16_t)(((int)raw[i*2] + raw[i*2+1]) / 2);
+      got = fr;
+    } else {
+      uint32_t left = beatDataEnd - beatFile.position();
+      uint32_t want = CHUNK * 2; if (want > left) want = left;
+      int n = beatFile.read((uint8_t*)mono, want);
+      got = n / 2;
+    }
+    if ((uint32_t)beatFile.position() >= beatDataEnd) beatFile.seek(beatDataPos);  // loop
+    if (sdMutex) xSemaphoreGive(sdMutex);
+
+    if (got > 0) xStreamBufferSend(beatStream, mono, got * 2, portMAX_DELAY);
+    else vTaskDelay(pdMS_TO_TICKS(2));
+  }
 }
 
 // =====================================================
@@ -323,19 +444,15 @@ void audioTask(void *param) {
 
   const int FRAMES = 128;   // bloco menor = menos latencia (era 256)
   int16_t buffer[FRAMES * 2];
+  static int16_t beatBuf[FRAMES];
 
   for (;;) {
-    if (!gAudioReady || gSampleLen <= 0) {
-      memset(buffer, 0, sizeof(buffer));
-      size_t w; i2s_write(I2S_NUM_0, buffer, sizeof(buffer), &w, portMAX_DELAY);
-      continue;
-    }
-
+    bool  scrReady = gAudioReady && gSampleLen > 0;
     bool  mute = gCut || gMuteScratch;
-    float vol = gVol;
+    float vol  = gVol;
+    float bvol = gBeatVol;
 
-    // POSITION-LOCK: integra EXATAMENTE quanto o prato moveu neste bloco.
-    // Sem catch-up (nao acelera), sem filtro/deadzone (agulha fica fixa).
+    // --- POSITION-LOCK do scratch (sempre atualiza o bookkeeping) ---
     portENTER_CRITICAL(&posMux);
     double target = gScratchTarget;
     portEXIT_CRITICAL(&posMux);
@@ -345,22 +462,36 @@ void audioTask(void *param) {
     static bool aInit = false;
     if (!aInit) { lastTarget = target; aInit = true; }
 
-    double step = (target - lastTarget) / FRAMES;   // avanco real do prato por amostra
+    double step = (target - lastTarget) / FRAMES;
     lastTarget = target;
-
-    if (fabs(step) < SCRATCH_PARADA) step = 0.0;     // quase parado -> congela (anti-ruido)
-    const double MAXSTEP = 32.0;                      // teto so p/ glitch (32x)
+    if (fabs(step) < SCRATCH_PARADA) step = 0.0;
+    const double MAXSTEP = 32.0;
     if (step >  MAXSTEP) step =  MAXSTEP;
     if (step < -MAXSTEP) step = -MAXSTEP;
 
+    // --- batida: puxa FRAMES amostras da fila (nao bloqueia) ---
+    int gotB = 0;
+    if (gBeatPlaying && beatStream) {
+      size_t r = xStreamBufferReceive(beatStream, beatBuf, FRAMES * 2, 0);
+      gotB = r / 2;
+    }
+
+    // --- mix scratch + batida ---
     for (int i = 0; i < FRAMES; i++) {
       playPos += step;
-      long idx = (long)floor(playPos);
-      long m = idx % gSampleLen; if (m < 0) m += gSampleLen;
-      long n = m + 1; if (n >= gSampleLen) n = 0;
-      double frac = playPos - floor(playPos);
-      float sv = gSample[m] + (gSample[n] - gSample[m]) * frac;
-      int16_t s = mute ? 0 : (int16_t)(sv * vol);
+      float scratchS = 0.0f;
+      if (scrReady && !mute) {
+        long idx = (long)floor(playPos);
+        long m = idx % gSampleLen; if (m < 0) m += gSampleLen;
+        long n = m + 1; if (n >= gSampleLen) n = 0;
+        double frac = playPos - floor(playPos);
+        scratchS = gSample[m] + (gSample[n] - gSample[m]) * frac;
+      }
+      float beatS = (i < gotB) ? (float)beatBuf[i] : 0.0f;
+      float mix = (scratchS + beatS * bvol) * vol;
+      if (mix >  32767.0f) mix =  32767.0f;
+      if (mix < -32768.0f) mix = -32768.0f;
+      int16_t s = (int16_t)mix;
       buffer[i * 2]     = s;
       buffer[i * 2 + 1] = s;
     }
@@ -384,7 +515,10 @@ void setup() {
   pinMode(ENC_SW, INPUT_PULLUP);
   for (int i = 0; i < 6; i++) pinMode(BTN_PINS[i], INPUT_PULLUP);
 
-  // ---- SD ----
+  // ---- SD + fila/mutex da batida ----
+  sdMutex    = xSemaphoreCreateMutex();
+  beatStream = xStreamBufferCreate(12288, 1);   // ~0.27s de batida bufferizada
+
   spiSD.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
   if (SD.begin(SD_CS, spiSD, SD_FREQ)) {
     Serial.println("SD OK.");
@@ -394,6 +528,9 @@ void setup() {
       gSample = loadWavToPSRAM(scratchFiles[0].c_str(), &gSampleLen);
       selIndex = 0;
     }
+    beatCount = scanFolder("/beats", beatFiles, MAX_FILES);
+    Serial.printf("%d batida(s) em /beats\n", beatCount);
+    if (beatCount > 0) { beatIndex = 0; openBeat(0); }
   } else {
     Serial.println("SD nao iniciou.");
   }
@@ -423,7 +560,8 @@ void setup() {
   motor.initFOC();
   Serial.println("Motor pronto.");
 
-  xTaskCreatePinnedToCore(audioTask, "audio", 8192, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(audioTask, "audio", 8192, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(beatTask,  "beat",  4096, NULL, 1, NULL, 0);
   Serial.println("Rodando!");
 }
 
@@ -463,18 +601,21 @@ void lerEncoder() {
 }
 
 // =====================================================
-// BOTOES (debounce simples)  -- funcoes provisorias
+// BOTOES (debounce simples) -- funcoes FINAIS
+//   1(GPIO21)=proxima batida   2(GPIO47)=batida anterior   3(GPIO48)=play/pause
+//   4(GPIO14)=mute scratch     5(GPIO2)=volume +           6(GPIO0)=volume -
 // =====================================================
 void onButton(int i) {
   switch (i) {
-    case 0: if (selIndex < scratchCount - 1) { selIndex++; aplicarSample(selIndex); } break; // proximo
-    case 1: if (selIndex > 0)                { selIndex--; aplicarSample(selIndex); } break; // anterior
-    case 2: gMuteScratch = !gMuteScratch; break;                                             // mute
-    case 3: gVol -= 0.1f; if (gVol < 0)    gVol = 0;    break;                               // vol -
-    case 4: gVol += 0.1f; if (gVol > 1.2f) gVol = 1.2f; break;                               // vol +
-    case 5: scratchPos = 0; break;                                                           // reset pos
+    case 0: gBeatReq = +1; break;                                       // proxima batida
+    case 1: gBeatReq = -1; break;                                       // batida anterior
+    case 2: gBeatPlaying = !gBeatPlaying; break;                        // play/pause batida
+    case 3: gMuteScratch = !gMuteScratch; break;                        // mute scratch
+    case 4: gVol += 0.1f; if (gVol > 1.2f) gVol = 1.2f; break;          // volume +
+    case 5: gVol -= 0.1f; if (gVol < 0)    gVol = 0;    break;          // volume -
   }
-  Serial.printf("BTN%d  (vol=%.1f mute=%d)\n", i + 1, gVol, gMuteScratch);
+  Serial.printf("BTN%d  (beat=%d play=%d vol=%.1f muteScr=%d)\n",
+                i + 1, beatIndex, gBeatPlaying, gVol, gMuteScratch);
 }
 
 void lerBotoes() {
