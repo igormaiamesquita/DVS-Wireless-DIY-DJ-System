@@ -51,14 +51,13 @@ const float NOMINAL_VEL = TARGET_VEL;
 const float DEADBAND  = 2.0;       // folga antes do motor "ceder" ao seu toque
 
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
-float MOTOR_TORQUE      = 3.0;   // FORCA DO MOTOR (volts). Maior = mais forte/firme. Tipico 2-6.
-float RETORNO           = 40.0; // RETORNO ao soltar: alto = volta ao giro normal quase na hora
-float VOLTAS_POR_SAMPLE = 1.0;  // quantas voltas do prato = 1 loop do sample ("colado" no prato)
-float SCRATCH_PITCH     = 1.0;  // trim fino de tom (1.0 = normal)
-float SCRATCH_PARADA    = 0.02; // congela o som qdo o prato esta quase parado (anti-ruido)
-float MOTOR_FILTRO      = 0.02; // suavidade do controle do motor (nao afeta o tom). 0.01 a 0.05
-float VOLUME_MESTRE     = 0.90; // volume geral (0.0 a ~1.2)
-float BEAT_VOL          = 0.60; // volume da BATIDA relativo ao scratch (0.0 a 1.0)
+float MOTOR_TORQUE   = 3.0;   // FORCA DO MOTOR (volts). Maior = mais forte/firme. Tipico 2-6.
+float RETORNO        = 3.0;   // volta GRADUAL ao giro normal ao soltar (baixo = suave, sem corridinha)
+float SCRATCH_PITCH  = 1.0;   // trim fino de tom (1.0 = normal)
+float SCRATCH_PARADA = 0.02;  // congela o som qdo o prato esta quase parado (anti-ruido)
+float MOTOR_FILTRO   = 0.02;  // suavidade do controle do motor (nao afeta o tom). 0.01 a 0.05
+float VOLUME_MESTRE  = 0.90;  // volume geral (0.0 a ~1.2)
+float BEAT_VOL       = 0.60;  // volume da BATIDA relativo ao scratch (0.0 a 1.0)
 // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 // =====================================================
@@ -121,7 +120,7 @@ volatile bool gAudioReady = false;     // false durante troca de sample -> silen
 volatile int32_t scratchPos = 0;       // (legado, nao usado no position-lock)
 
 // --- POSITION-LOCK: audio colado na POSICAO do prato (agulha fixa) ---
-// gFramesPerRad e recalculado p/ "colar" o sample no prato (VOLTAS_POR_SAMPLE)
+// gFramesPerRad: tom normal (1.0x no giro nominal)
 double gFramesPerRad = (double)SAMPLE_RATE / NOMINAL_VEL;
 portMUX_TYPE posMux = portMUX_INITIALIZER_UNLOCKED;
 volatile double gScratchTarget = 0.0;  // posicao do prato em frames (cumulativo)
@@ -258,12 +257,10 @@ int16_t* loadWavToPSRAM(const char* path, int32_t* lenOut) {
 }
 
 // =====================================================
-// Recalcula o mapeamento angulo->sample (cola o sample no prato)
+// Mapeamento angulo->sample (TOM NORMAL = 1.0x no giro nominal)
 // =====================================================
 void recalcMap() {
-  if (gSampleLen <= 0) { gFramesPerRad = (double)SAMPLE_RATE / NOMINAL_VEL; return; }
-  double sgn = (NOMINAL_VEL < 0) ? -1.0 : 1.0;   // mantem o sentido
-  gFramesPerRad = sgn * (double)gSampleLen / (VOLTAS_POR_SAMPLE * 2.0 * PI);
+  gFramesPerRad = (double)SAMPLE_RATE / NOMINAL_VEL;
 }
 
 // =====================================================
