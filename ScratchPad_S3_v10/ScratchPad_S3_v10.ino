@@ -31,6 +31,9 @@
 #include <SD.h>
 #include "freertos/stream_buffer.h"
 #include "freertos/semphr.h"
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Update.h>
 
 // =====================================================
 // Motor / DRV8313 / AS5600
@@ -91,6 +94,7 @@ SPIClass spiSD(FSPI);
 // Botoes (GND comum)  -- GPIO 0 e strapping (nao segurar no boot)
 // =====================================================
 const uint8_t BTN_PINS[6] = {21, 47, 48, 14, 2, 0};
+#define MAINT_BTN 21   // segurar este botao ao LIGAR -> modo manutencao (WiFi/OTA/upload)
 
 // =====================================================
 // I2S / UDA1334A
@@ -610,11 +614,123 @@ void audioTask(void *param) {
 }
 
 // =====================================================
+// MODO MANUTENCAO (WiFi AP + pagina web: OTA + upload WAV + download)
+// =====================================================
+WebServer server(80);
+File webFile;
+
+String listaPasta(const char* dir) {
+  String s = "";
+  File d = SD.open(dir);
+  if (d && d.isDirectory()) {
+    File e = d.openNextFile();
+    while (e) {
+      if (!e.isDirectory()) {
+        String nm = e.name();
+        String base = nm; int sl = base.lastIndexOf('/'); if (sl >= 0) base = base.substring(sl + 1);
+        if (!base.startsWith(".")) {
+          String full = nm.startsWith("/") ? nm : (String(dir) + "/" + base);
+          s += "<li><a href='/dl?p=" + full + "'>" + base + "</a> (" + String(e.size() / 1024) + " KB)</li>";
+        }
+      }
+      e = d.openNextFile();
+    }
+  }
+  return s;
+}
+
+String paginaHtml() {
+  String h = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  h += "<title>ScratchPad</title></head><body style='font-family:sans-serif;max-width:640px;margin:auto;padding:10px'>";
+  h += "<h2>ScratchPad - Manutencao</h2>";
+  h += "<h3>1) Atualizar firmware (.bin)</h3>";
+  h += "<form method='POST' action='/update' enctype='multipart/form-data'>";
+  h += "<input type='file' name='f' accept='.bin'> <input type='submit' value='Atualizar'></form>";
+  h += "<h3>2) Enviar WAV p/ /scratch</h3>";
+  h += "<form method='POST' action='/upload?folder=scratch' enctype='multipart/form-data'>";
+  h += "<input type='file' name='f' accept='.wav'> <input type='submit' value='Enviar'></form>";
+  h += "<h3>3) Enviar WAV p/ /beats</h3>";
+  h += "<form method='POST' action='/upload?folder=beats' enctype='multipart/form-data'>";
+  h += "<input type='file' name='f' accept='.wav'> <input type='submit' value='Enviar'></form>";
+  h += "<h3>Gravacoes</h3><ul>" + listaPasta("/records") + "</ul>";
+  h += "<h3>/scratch</h3><ul>" + listaPasta("/scratch") + "</ul>";
+  h += "<h3>/beats</h3><ul>" + listaPasta("/beats") + "</ul>";
+  h += "</body></html>";
+  return h;
+}
+
+void handleDownload() {
+  if (!server.hasArg("p")) { server.send(400, "text/plain", "sem p"); return; }
+  File f = SD.open(server.arg("p").c_str(), FILE_READ);
+  if (!f) { server.send(404, "text/plain", "nao achou"); return; }
+  server.sendHeader("Content-Disposition", "attachment");
+  server.streamFile(f, "application/octet-stream");
+  f.close();
+}
+
+void maintenanceMode() {
+  Serial.println("=== MODO MANUTENCAO ===");
+
+  spiSD.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  if (SD.begin(SD_CS, spiSD, SD_FREQ)) Serial.println("SD OK."); else Serial.println("SD falhou.");
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("ScratchPad", "12345678");
+  Serial.print("WiFi 'ScratchPad' (senha 12345678) -> abra  http://");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/", []() { server.send(200, "text/html", paginaHtml()); });
+  server.on("/dl", handleDownload);
+
+  // --- OTA firmware ---
+  server.on("/update", HTTP_POST,
+    []() {
+      server.send(200, "text/html", Update.hasError() ? "FALHOU" : "OK! Reiniciando...");
+      delay(800); ESP.restart();
+    },
+    []() {
+      HTTPUpload& up = server.upload();
+      if (up.status == UPLOAD_FILE_START)      { Update.begin(UPDATE_SIZE_UNKNOWN); }
+      else if (up.status == UPLOAD_FILE_WRITE) { Update.write(up.buf, up.currentSize); }
+      else if (up.status == UPLOAD_FILE_END)   { Update.end(true); }
+    });
+
+  // --- upload WAV pro SD ---
+  server.on("/upload", HTTP_POST,
+    []() { server.send(200, "text/html", "Enviado! <a href='/'>voltar</a>"); },
+    []() {
+      HTTPUpload& up = server.upload();
+      String folder = server.hasArg("folder") ? server.arg("folder") : "scratch";
+      String dir = "/" + folder;
+      if (up.status == UPLOAD_FILE_START) {
+        if (!SD.exists(dir.c_str())) SD.mkdir(dir.c_str());
+        webFile = SD.open((dir + "/" + up.filename).c_str(), FILE_WRITE);
+      } else if (up.status == UPLOAD_FILE_WRITE) {
+        if (webFile) webFile.write(up.buf, up.currentSize);
+      } else if (up.status == UPLOAD_FILE_END) {
+        if (webFile) webFile.close();
+      }
+    });
+
+  server.begin();
+  Serial.println("Servidor pronto. (segurar o botao no boot foi detectado)");
+  while (true) { server.handleClient(); delay(2); }   // fica aqui ate desligar
+}
+
+// =====================================================
 // SETUP
 // =====================================================
 void setup() {
   Serial.begin(115200);
   delay(800);
+
+  // ---- modo manutencao: segurar o botao 1 (GPIO21) ao LIGAR ----
+  pinMode(MAINT_BTN, INPUT_PULLUP);
+  delay(20);
+  if (digitalRead(MAINT_BTN) == LOW) {
+    maintenanceMode();   // entra no WiFi/web e NAO retorna
+  }
+
   Serial.println("=== ScratchPad S3 v10 (SD + encoder) ===");
 
   // ---- entradas ----
