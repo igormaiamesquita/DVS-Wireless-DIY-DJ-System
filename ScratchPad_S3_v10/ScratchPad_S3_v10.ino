@@ -153,6 +153,13 @@ uint32_t beatDataPos  = 0;                 // inicio do PCM no arquivo
 uint32_t beatDataEnd  = 0;                 // fim do PCM
 
 // =====================================================
+// Gravacao /records (grava o MIX final no SD)
+// =====================================================
+StreamBufferHandle_t recStream = NULL;     // audio -> gravador
+volatile bool gRecording = false;          // status
+volatile int  gRecCmd    = 0;              // 1 = comecar, -1 = parar (pedido do botao)
+
+// =====================================================
 // WRAP / interpolacao
 // =====================================================
 static inline int32_t wrapPos(int32_t p) {
@@ -436,6 +443,78 @@ void beatTask(void *param) {
 }
 
 // =====================================================
+// Gravacao: helpers WAV + task gravadora
+// =====================================================
+static void wr16(File &f, uint16_t v) { uint8_t b[2] = {(uint8_t)v, (uint8_t)(v >> 8)}; f.write(b, 2); }
+static void wr32(File &f, uint32_t v) {
+  uint8_t b[4] = {(uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
+  f.write(b, 4);
+}
+void writeWavHeader(File &f, uint32_t dataBytes) {
+  uint32_t rate = SAMPLE_RATE; uint16_t ch = 1, bits = 16;
+  f.write((const uint8_t*)"RIFF", 4); wr32(f, 36 + dataBytes); f.write((const uint8_t*)"WAVE", 4);
+  f.write((const uint8_t*)"fmt ", 4); wr32(f, 16); wr16(f, 1); wr16(f, ch);
+  wr32(f, rate); wr32(f, rate * ch * bits / 8); wr16(f, ch * bits / 8); wr16(f, bits);
+  f.write((const uint8_t*)"data", 4); wr32(f, dataBytes);
+}
+String nextRecName() {
+  for (int i = 1; i < 10000; i++) {
+    char p[40]; snprintf(p, sizeof(p), "/records/REC_%04d.wav", i);
+    if (!SD.exists(p)) return String(p);
+  }
+  return "/records/REC_9999.wav";
+}
+
+void recorderTask(void *param) {
+  static File recFile;
+  static bool recOpen = false;
+  static uint32_t recBytes = 0;
+  static int16_t rbuf[512];
+
+  for (;;) {
+    // --- comecar ---
+    if (gRecCmd == 1 && !recOpen) {
+      gRecCmd = 0;
+      String name = nextRecName();
+      if (sdMutex) xSemaphoreTake(sdMutex, portMAX_DELAY);
+      if (!SD.exists("/records")) SD.mkdir("/records");
+      recFile = SD.open(name.c_str(), FILE_WRITE);
+      if (recFile) {
+        writeWavHeader(recFile, 0); recBytes = 0; recOpen = true; gRecording = true;
+        Serial.printf("REC iniciado: %s\n", name.c_str());
+      } else Serial.println("REC: nao abriu arquivo");
+      if (sdMutex) xSemaphoreGive(sdMutex);
+      continue;
+    }
+    // --- parar ---
+    if (gRecCmd == -1 && recOpen) {
+      gRecCmd = 0;
+      if (sdMutex) xSemaphoreTake(sdMutex, portMAX_DELAY);
+      size_t r;
+      while ((r = xStreamBufferReceive(recStream, rbuf, sizeof(rbuf), 0)) > 0) {
+        recFile.write((uint8_t*)rbuf, r); recBytes += r;     // drena o que sobrou
+      }
+      recFile.seek(0); writeWavHeader(recFile, recBytes);    // corrige tamanhos
+      recFile.close(); recOpen = false; gRecording = false;
+      if (sdMutex) xSemaphoreGive(sdMutex);
+      Serial.printf("REC parado: %.1fs gravados\n", (float)recBytes / 2 / SAMPLE_RATE);
+      continue;
+    }
+    gRecCmd = 0;
+
+    if (!recOpen) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+
+    // --- grava chunk ---
+    size_t r = xStreamBufferReceive(recStream, rbuf, sizeof(rbuf), pdMS_TO_TICKS(50));
+    if (r > 0) {
+      if (sdMutex) xSemaphoreTake(sdMutex, portMAX_DELAY);
+      recFile.write((uint8_t*)rbuf, r); recBytes += r;
+      if (sdMutex) xSemaphoreGive(sdMutex);
+    }
+  }
+}
+
+// =====================================================
 // AUDIO TASK (nucleo 0)
 // =====================================================
 void audioTask(void *param) {
@@ -465,6 +544,7 @@ void audioTask(void *param) {
   const int FRAMES = 128;   // bloco menor = menos latencia (era 256)
   int16_t buffer[FRAMES * 2];
   static int16_t beatBuf[FRAMES];
+  static int16_t recBuf[FRAMES];   // mix mono p/ gravacao
 
   for (;;) {
     bool  scrReady = gAudioReady && gSampleLen > 0;
@@ -517,7 +597,12 @@ void audioTask(void *param) {
       int16_t s = (int16_t)mix;
       buffer[i * 2]     = s;
       buffer[i * 2 + 1] = s;
+      recBuf[i] = s;                 // guarda o mix mono p/ gravar
     }
+
+    // grava o mix (nao bloqueia; se a fila encher, descarta)
+    if (gRecording && recStream)
+      xStreamBufferSend(recStream, recBuf, FRAMES * 2, 0);
 
     size_t written;
     i2s_write(I2S_NUM_0, buffer, sizeof(buffer), &written, portMAX_DELAY);
@@ -538,9 +623,10 @@ void setup() {
   pinMode(ENC_SW, INPUT_PULLUP);
   for (int i = 0; i < 6; i++) pinMode(BTN_PINS[i], INPUT_PULLUP);
 
-  // ---- SD + fila/mutex da batida ----
+  // ---- SD + fila/mutex da batida + fila de gravacao ----
   sdMutex    = xSemaphoreCreateMutex();
   beatStream = xStreamBufferCreate(12288, 1);   // ~0.27s de batida bufferizada
+  recStream  = xStreamBufferCreate(16384, 1);   // ~0.37s de mix p/ gravar
 
   spiSD.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
   if (SD.begin(SD_CS, spiSD, SD_FREQ)) {
@@ -584,8 +670,9 @@ void setup() {
   motor.initFOC();
   Serial.println("Motor pronto.");
 
-  xTaskCreatePinnedToCore(audioTask, "audio", 8192, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(beatTask,  "beat",  4096, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(audioTask,    "audio", 8192, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(beatTask,     "beat",  4096, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(recorderTask, "rec",   4096, NULL, 1, NULL, 0);
   Serial.println("Rodando!");
 }
 
@@ -627,7 +714,7 @@ void lerEncoder() {
 // =====================================================
 // BOTOES (debounce simples) -- funcoes FINAIS
 //   1(GPIO21)=proxima batida   2(GPIO47)=batida anterior   3(GPIO48)=play/pause
-//   4(GPIO14)=mute scratch     5(GPIO2)=volume +           6(GPIO0)=volume -
+//   4(GPIO14)=mute scratch     5(GPIO2)=volume (cicla)     6(GPIO0)=GRAVAR (start/stop)
 // =====================================================
 void onButton(int i) {
   switch (i) {
@@ -635,11 +722,11 @@ void onButton(int i) {
     case 1: gBeatReq = -1; break;                                       // batida anterior
     case 2: gBeatPlaying = !gBeatPlaying; break;                        // play/pause batida
     case 3: gMuteScratch = !gMuteScratch; break;                        // mute scratch
-    case 4: gVol += 0.1f; if (gVol > 1.2f) gVol = 1.2f; break;          // volume +
-    case 5: gVol -= 0.1f; if (gVol < 0)    gVol = 0;    break;          // volume -
+    case 4: gVol += 0.15f; if (gVol > 1.2f) gVol = 0.15f; break;        // volume (cicla)
+    case 5: gRecCmd = gRecording ? -1 : 1; break;                       // GRAVAR start/stop
   }
-  Serial.printf("BTN%d  (beat=%d play=%d vol=%.1f muteScr=%d)\n",
-                i + 1, beatIndex, gBeatPlaying, gVol, gMuteScratch);
+  Serial.printf("BTN%d  (beat=%d play=%d vol=%.1f muteScr=%d rec=%d)\n",
+                i + 1, beatIndex, gBeatPlaying, gVol, gMuteScratch, gRecording);
 }
 
 void lerBotoes() {
