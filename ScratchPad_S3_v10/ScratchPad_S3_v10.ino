@@ -48,16 +48,17 @@ MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
 const float TARGET_VEL  = -12.0;   // velocidade de giro do prato (rad/s); sinal = sentido
 const float NOMINAL_VEL = TARGET_VEL;
 
-const float RAMP_RATE = 3.0;       // quao rapido o prato volta a girar depois que voce solta
 const float DEADBAND  = 2.0;       // folga antes do motor "ceder" ao seu toque
 
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
-float MOTOR_TORQUE   = 3.0;   // FORCA DO MOTOR (volts). Maior = mais forte/firme. Tipico 2-6.
-float SCRATCH_PITCH  = 1.0;   // afinacao de TOM (1.0 = normal). Sobe se sair grave, desce se agudo
-float SCRATCH_PARADA = 0.02;  // congela o som qdo o prato esta quase parado (anti-ruido)
-float MOTOR_FILTRO   = 0.02;  // suavidade do controle do motor (nao afeta o tom). 0.01 a 0.05
-float VOLUME_MESTRE  = 0.90;  // volume geral (0.0 a ~1.2)
-float BEAT_VOL       = 0.60;  // volume da BATIDA relativo ao scratch (0.0 a 1.0)
+float MOTOR_TORQUE      = 3.0;   // FORCA DO MOTOR (volts). Maior = mais forte/firme. Tipico 2-6.
+float RETORNO           = 40.0; // RETORNO ao soltar: alto = volta ao giro normal quase na hora
+float VOLTAS_POR_SAMPLE = 1.0;  // quantas voltas do prato = 1 loop do sample ("colado" no prato)
+float SCRATCH_PITCH     = 1.0;  // trim fino de tom (1.0 = normal)
+float SCRATCH_PARADA    = 0.02; // congela o som qdo o prato esta quase parado (anti-ruido)
+float MOTOR_FILTRO      = 0.02; // suavidade do controle do motor (nao afeta o tom). 0.01 a 0.05
+float VOLUME_MESTRE     = 0.90; // volume geral (0.0 a ~1.2)
+float BEAT_VOL          = 0.60; // volume da BATIDA relativo ao scratch (0.0 a 1.0)
 // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 // =====================================================
@@ -120,7 +121,8 @@ volatile bool gAudioReady = false;     // false durante troca de sample -> silen
 volatile int32_t scratchPos = 0;       // (legado, nao usado no position-lock)
 
 // --- POSITION-LOCK: audio colado na POSICAO do prato (agulha fixa) ---
-const double FRAMES_PER_RAD = (double)SAMPLE_RATE / NOMINAL_VEL;  // 1.0x no giro nominal
+// gFramesPerRad e recalculado p/ "colar" o sample no prato (VOLTAS_POR_SAMPLE)
+double gFramesPerRad = (double)SAMPLE_RATE / NOMINAL_VEL;
 portMUX_TYPE posMux = portMUX_INITIALIZER_UNLOCKED;
 volatile double gScratchTarget = 0.0;  // posicao do prato em frames (cumulativo)
 
@@ -240,8 +242,28 @@ int16_t* loadWavToPSRAM(const char* path, int32_t* lenOut) {
     }
   }
   f.close();
+
+  // suaviza as pontas (~5ms) p/ o LOOP nao dar estalo na emenda
+  int fade = SAMPLE_RATE / 200;
+  if (fade * 2 < len) {
+    for (int i = 0; i < fade; i++) {
+      float g = (float)i / fade;
+      buf[i]           = (int16_t)(buf[i] * g);
+      buf[len - 1 - i] = (int16_t)(buf[len - 1 - i] * g);
+    }
+  }
+
   if (lenOut) *lenOut = len;
   return buf;
+}
+
+// =====================================================
+// Recalcula o mapeamento angulo->sample (cola o sample no prato)
+// =====================================================
+void recalcMap() {
+  if (gSampleLen <= 0) { gFramesPerRad = (double)SAMPLE_RATE / NOMINAL_VEL; return; }
+  double sgn = (NOMINAL_VEL < 0) ? -1.0 : 1.0;   // mantem o sentido
+  gFramesPerRad = sgn * (double)gSampleLen / (VOLTAS_POR_SAMPLE * 2.0 * PI);
 }
 
 // =====================================================
@@ -313,6 +335,7 @@ void aplicarSample(int idx) {
   gSample = nb;
   gSampleLen = newLen;
   scratchPos = 0;
+  recalcMap();                  // re-cola o novo sample na volta do prato
   gAudioReady = true;
   if (old) free(old);
   Serial.printf("OK: %d frames (%.2fs)\n", newLen, (float)newLen / SAMPLE_RATE);
@@ -448,7 +471,7 @@ void audioTask(void *param) {
 
   for (;;) {
     bool  scrReady = gAudioReady && gSampleLen > 0;
-    bool  mute = gCut || gMuteScratch;
+    float muteTarget = (gCut || gMuteScratch) ? 0.0f : 1.0f;  // alvo do mute (suavizado)
     float vol  = gVol;
     float bvol = gBeatVol;
 
@@ -477,16 +500,19 @@ void audioTask(void *param) {
     }
 
     // --- mix scratch + batida ---
+    static float scrGain = 1.0f;        // ganho suavizado do scratch (anti-estalo no cut)
     for (int i = 0; i < FRAMES; i++) {
       playPos += step;
       float scratchS = 0.0f;
-      if (scrReady && !mute) {
+      if (scrReady) {
         long idx = (long)floor(playPos);
         long m = idx % gSampleLen; if (m < 0) m += gSampleLen;
         long n = m + 1; if (n >= gSampleLen) n = 0;
         double frac = playPos - floor(playPos);
         scratchS = gSample[m] + (gSample[n] - gSample[m]) * frac;
       }
+      scrGain += (muteTarget - scrGain) * 0.01f;   // ~5ms de fade no cut (sem estalo)
+      scratchS *= scrGain;
       float beatS = (i < gotB) ? (float)beatBuf[i] : 0.0f;
       float mix = (scratchS + beatS * bvol) * vol;
       if (mix >  32767.0f) mix =  32767.0f;
@@ -535,6 +561,7 @@ void setup() {
     Serial.println("SD nao iniciou.");
   }
   if (!gSample) gerarSampleTeste();
+  recalcMap();                  // cola o sample na volta do prato
   gAudioReady = (gSampleLen > 0);
 
   // ---- motor ----
@@ -656,7 +683,7 @@ void loop() {
   if (vDir < setDir - DEADBAND) {
     setDir = vDir + DEADBAND;              // prato freado -> setpoint cede (mas mantem torque p/ subir)
   } else {
-    setDir += RAMP_RATE * dt;             // livre -> sobe devagar ate o alvo
+    setDir += RETORNO * dt;               // livre -> volta ao giro normal (RETORNO alto = quase na hora)
     if (setDir > tgtDir) setDir = tgtDir;
   }
   if (setDir < 0) setDir = 0;
@@ -672,7 +699,7 @@ void loop() {
   float dA = ang - lastAngle;
   lastAngle = ang;
   portENTER_CRITICAL(&posMux);
-  gScratchTarget += (double)dA * FRAMES_PER_RAD * SCRATCH_PITCH;
+  gScratchTarget += (double)dA * gFramesPerRad * SCRATCH_PITCH;
   portEXIT_CRITICAL(&posMux);
 
   gSpeedFactor = v / NOMINAL_VEL;   // so p/ debug
