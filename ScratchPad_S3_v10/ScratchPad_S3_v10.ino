@@ -914,11 +914,12 @@ void loop() {
 
   gSpeedFactor = v / NOMINAL_VEL;   // so p/ debug
 
-  // debug: confirma se o prato gira (v = velocidade real)
+  // debug: v=velocidade  cut=crossfader cortando  mute=botao mute  ready=sample carregado
   static uint32_t tDbg = 0;
   if (millis() - tDbg > 500) {
     tDbg = millis();
-    Serial.printf("v=%.2f set=%.2f sf=%.2f cut=%d\n", v, setVel, gSpeedFactor, gCut);
+    Serial.printf("v=%.2f sf=%.2f | cut=%d mute=%d ready=%d  (scratch sai se cut=0 e mute=0)\n",
+                  v, gSpeedFactor, gCut, gMuteScratch, gAudioReady);
   }
 
   // entradas
