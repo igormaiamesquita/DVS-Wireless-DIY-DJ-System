@@ -473,19 +473,22 @@ void recorderTask(void *param) {
   static File recFile;
   static bool recOpen = false;
   static uint32_t recBytes = 0;
-  static int16_t rbuf[512];
+  static String recPath = "";
+  static uint32_t lastSync = 0;
+  static int16_t rbuf[2048];   // 4KB por escrita (menos overhead no SD)
 
   for (;;) {
     // --- comecar ---
     if (gRecCmd == 1 && !recOpen) {
       gRecCmd = 0;
-      String name = nextRecName();
+      recPath = nextRecName();
       if (sdMutex) xSemaphoreTake(sdMutex, portMAX_DELAY);
       if (!SD.exists("/records")) SD.mkdir("/records");
-      recFile = SD.open(name.c_str(), FILE_WRITE);
+      recFile = SD.open(recPath.c_str(), FILE_WRITE);
       if (recFile) {
         writeWavHeader(recFile, 0); recBytes = 0; recOpen = true; gRecording = true;
-        Serial.printf("REC iniciado: %s\n", name.c_str());
+        lastSync = millis();
+        Serial.printf("REC iniciado: %s\n", recPath.c_str());
       } else Serial.println("REC: nao abriu arquivo");
       if (sdMutex) xSemaphoreGive(sdMutex);
       continue;
@@ -509,10 +512,17 @@ void recorderTask(void *param) {
     if (!recOpen) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
 
     // --- grava chunk ---
-    size_t r = xStreamBufferReceive(recStream, rbuf, sizeof(rbuf), pdMS_TO_TICKS(50));
+    size_t r = xStreamBufferReceive(recStream, rbuf, sizeof(rbuf), pdMS_TO_TICKS(40));
     if (r > 0) {
       if (sdMutex) xSemaphoreTake(sdMutex, portMAX_DELAY);
       recFile.write((uint8_t*)rbuf, r); recBytes += r;
+      // a cada ~1.5s salva cabecalho+flush -> arquivo fica VALIDO mesmo sem parar
+      if (millis() - lastSync > 1500) {
+        lastSync = millis();
+        uint32_t pos = recFile.position();
+        recFile.seek(0); writeWavHeader(recFile, recBytes); recFile.seek(pos);
+        recFile.flush();
+      }
       if (sdMutex) xSemaphoreGive(sdMutex);
     }
   }
@@ -741,8 +751,8 @@ void setup() {
 
   // ---- SD + fila/mutex da batida + fila de gravacao ----
   sdMutex    = xSemaphoreCreateMutex();
-  beatStream = xStreamBufferCreate(12288, 1);   // ~0.27s de batida bufferizada
-  recStream  = xStreamBufferCreate(16384, 1);   // ~0.37s de mix p/ gravar
+  beatStream = xStreamBufferCreate(24576, 1);   // ~0.55s de batida (absorve picos do SD ao gravar)
+  recStream  = xStreamBufferCreate(32768, 1);   // ~0.74s de mix p/ gravar
 
   spiSD.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
   if (SD.begin(SD_CS, spiSD, SD_FREQ)) {
