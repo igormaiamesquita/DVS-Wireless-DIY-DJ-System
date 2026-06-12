@@ -229,6 +229,11 @@ int16_t* loadWavToPSRAM(const char* path, int32_t* lenOut) {
 
   int16_t* buf = (int16_t*)heap_caps_malloc(len * sizeof(int16_t), MALLOC_CAP_SPIRAM);
   if (!buf) {
+    // sem PSRAM (ou cheia)? tenta RAM interna - sample curto ainda toca
+    buf = (int16_t*)heap_caps_malloc(len * sizeof(int16_t), MALLOC_CAP_8BIT);
+    if (buf) Serial.println("AVISO: sample na RAM interna (PSRAM indisponivel?)");
+  }
+  if (!buf) {
     Serial.printf("Sample grande demais: precisa %d KB, livre na PSRAM %d KB.\n",
                   (int)(len * 2 / 1024),
                   (int)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
@@ -310,6 +315,8 @@ void gerarSampleTeste() {
   float secs = 1.0f;
   gSampleLen = (int32_t)(secs * SAMPLE_RATE);
   gSample = (int16_t*)heap_caps_malloc(gSampleLen * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+  if (!gSample)  // sem PSRAM? gera na RAM interna (1s = ~44KB, cabe)
+    gSample = (int16_t*)heap_caps_malloc(gSampleLen * sizeof(int16_t), MALLOC_CAP_8BIT);
   if (!gSample) { gSampleLen = 0; return; }
   for (int32_t i = 0; i < gSampleLen; i++) {
     float t = (float)i / SAMPLE_RATE;
@@ -653,6 +660,14 @@ String paginaHtml() {
   String h = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
   h += "<title>ScratchPad</title></head><body style='font-family:sans-serif;max-width:640px;margin:auto;padding:10px'>";
   h += "<h2>ScratchPad - Manutencao</h2>";
+  // --- diagnostico (sem precisar de Serial) ---
+  uint32_t psram = ESP.getPsramSize();
+  h += "<p style='padding:8px;border:1px solid #888'>";
+  h += "<b>PSRAM:</b> " + String(psram / 1024) + " KB ";
+  h += (psram == 0) ? "<b style='color:red'>(DESLIGADA! Tools-&gt;PSRAM: OPI PSRAM e recompile - sem ela o scratch fica MUDO)</b>" : "(ok)";
+  h += "<br><b>Heap livre:</b> " + String(ESP.getFreeHeap() / 1024) + " KB";
+  h += "<br><b>Versao:</b> " + String(__DATE__) + " " + String(__TIME__);
+  h += "</p>";
   h += "<h3>1) Atualizar firmware (.bin)</h3>";
   h += "<form method='POST' action='/update' enctype='multipart/form-data'>";
   h += "<input type='file' name='f' accept='.bin'> <input type='submit' value='Atualizar'></form>";
@@ -671,10 +686,13 @@ String paginaHtml() {
 
 void handleDownload() {
   if (!server.hasArg("p")) { server.send(400, "text/plain", "sem p"); return; }
-  File f = SD.open(server.arg("p").c_str(), FILE_READ);
+  String p = server.arg("p");
+  File f = SD.open(p.c_str(), FILE_READ);
   if (!f) { server.send(404, "text/plain", "nao achou"); return; }
-  server.sendHeader("Content-Disposition", "attachment");
-  server.streamFile(f, "application/octet-stream");
+  // manda o NOME com extensao -> navegador salva como .wav
+  String base = p; int sl = base.lastIndexOf('/'); if (sl >= 0) base = base.substring(sl + 1);
+  server.sendHeader("Content-Disposition", "attachment; filename=\"" + base + "\"");
+  server.streamFile(f, "audio/wav");
   f.close();
 }
 
