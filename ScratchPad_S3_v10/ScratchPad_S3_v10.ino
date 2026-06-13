@@ -48,7 +48,7 @@ BLDCMotor motor = BLDCMotor(7);
 BLDCDriver3PWM driver = BLDCDriver3PWM(DRV_IN1, DRV_IN2, DRV_IN3);
 MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
 
-// PARAFUSO: o sample inteiro mapeado por VOLTAS_POR_SAMPLE voltas (absoluto/reversivel).
+// PARAFUSO com velocidade FIXA do prato (SEG_POR_VOLTA): mapeamento absoluto/reversivel.
 float gTargetVel = -3.49f;   // recalculado por sample (rad/s, negativo = sentido)
 
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
