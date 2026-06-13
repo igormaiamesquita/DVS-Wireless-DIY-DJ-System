@@ -53,11 +53,11 @@ float gTargetVel = -3.49f;   // recalculado por sample (rad/s, negativo = sentid
 float gSpeedMult = 1.0f;     // multiplicador de velocidade/tom (long-press: 1.0 <-> 1.35)
 
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
-float MIN_REV_SEG    = 1.5;   // tempo MINIMO de 1 volta (s). Sample mais curto LOOPA p/ nao acelerar o prato
-float MOTOR_TORQUE   = 2.5;   // torque (V) p/ MANTER o giro. Baixo = cede facil ao scratch e recupera suave
+float ALVO_REV_SEG   = 0.7;   // tempo ALVO de 1 volta (s). MENOR = prato mais rapido = MENOS distorcao/wow
+float STEP_SUAVE     = 0.35;  // suavizacao do audio (mata o wow). Menor=mais suave; 1.0=sem suavizar
+float MOTOR_TORQUE   = 3.0;   // torque (V) p/ MANTER o giro constante. Maior = giro mais estavel (menos wow)
 float TORQUE_START   = 6.0;   // torque extra nos primeiros 2.5s p/ GARANTIR a partida do prato
-float FIRMEZA        = 0.15;  // rigidez do controle (PID P). Maior = mais preso/responsivo (cuidado: chia)
-float SCRATCH_PITCH  = 1.0;   // trim fino de tom (1.0 = normal)
+float FIRMEZA        = 0.18;  // rigidez do controle (PID P). Maior = mais preso/responsivo (cuidado: chia)
 float SCRATCH_PARADA = 0.02;  // congela o som qdo o prato esta quase parado (anti-ruido)
 float MOTOR_FILTRO   = 0.02;  // suavidade do controle do motor (nao afeta o tom). 0.01 a 0.05
 float VOLUME_MESTRE  = 0.90;  // volume geral (0.0 a ~1.2)
@@ -273,18 +273,24 @@ int16_t* loadWavToPSRAM(const char* path, int32_t* lenOut) {
 }
 
 // =====================================================
-// Mapeamento angulo->sample (GRUDADO). Sample curto (< MIN_REV_SEG) loopa N vezes inteiras por volta,
-// E a velocidade do prato e derivada do sample p/ tocar 1x. -> o SAMPLE decide a rotacao.
+// Mapeamento angulo->sample (GRUDADO). O prato gira sempre ~ALVO_REV_SEG por volta (rapido o bastante
+// p/ o sensor nao distorcer). Sample curto LOOPA N vezes inteiras/volta; sample longo ocupa N voltas
+// inteiras. Em ambos os casos a marcacao no disco fica consistente.
 // =====================================================
 void recalcMap() {
   if (gSampleLen <= 0) return;
   float sampleSec = (float)gSampleLen / (float)SAMPLE_RATE;
-  int loops = 1;
-  if (sampleSec < MIN_REV_SEG) loops = (int)ceilf(MIN_REV_SEG / sampleSec);   // curto: loopa p/ encher a volta
-  double framesPerRev = (double)loops * (double)gSampleLen;                    // frames de audio em 1 volta
+  double framesPerRev;
+  if (sampleSec >= ALVO_REV_SEG) {                       // sample longo: N voltas inteiras = 1 sample
+    int revs = (int)lroundf(sampleSec / ALVO_REV_SEG); if (revs < 1) revs = 1;
+    framesPerRev = (double)gSampleLen / revs;
+  } else {                                               // sample curto: M loops inteiros por volta
+    int loops = (int)lroundf(ALVO_REV_SEG / sampleSec); if (loops < 1) loops = 1;
+    framesPerRev = (double)loops * (double)gSampleLen;
+  }
   gFramesPerRad = -framesPerRev / TWO_PI;
-  float revSec = (float)framesPerRev / (float)SAMPLE_RATE;                     // duracao de 1 volta (>= MIN_REV_SEG)
-  gTargetVel = -(TWO_PI / revSec) * gSpeedMult;                               // velocidade p/ tocar 1x
+  float revSec = (float)framesPerRev / (float)SAMPLE_RATE;   // ~ALVO_REV_SEG
+  gTargetVel = -(TWO_PI / revSec) * gSpeedMult;             // velocidade p/ tocar 1x
 }
 
 // =====================================================
@@ -591,12 +597,15 @@ void audioTask(void *param) {
     static bool aInit = false;
     if (!aInit) { lastTarget = target; aInit = true; }
 
-    double step = (target - lastTarget) / FRAMES;
-    if (fabs(step) < SCRATCH_PARADA) {
-      step = 0.0;                 // quase parado: congela MAS nao consome o movimento
+    double rawStep = (target - lastTarget) / FRAMES;
+    if (fabs(rawStep) < SCRATCH_PARADA) {
+      rawStep = 0.0;              // quase parado: congela MAS nao consome o movimento
     } else {                      // (lastTarget so avanca quando aplica -> SEM drift)
       lastTarget = target;
     }
+    // suaviza a taxa (mata o "wow"/quantizacao do sensor) mantendo a posicao grudada
+    static double step = 0.0;
+    step += (rawStep - step) * STEP_SUAVE;
     const double MAXSTEP = 32.0;
     if (step >  MAXSTEP) step =  MAXSTEP;
     if (step < -MAXSTEP) step = -MAXSTEP;
