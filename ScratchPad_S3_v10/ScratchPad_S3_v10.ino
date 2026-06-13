@@ -51,11 +51,11 @@ MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
 const float TARGET_VEL  = -12.0;   // velocidade de giro do prato (rad/s); sinal = sentido
 const float NOMINAL_VEL = TARGET_VEL;
 
-const float DEADBAND  = 2.0;       // folga antes do motor "ceder" ao seu toque
-
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
-float MOTOR_TORQUE   = 3.0;   // FORCA DO MOTOR (volts). Maior = mais forte/firme. Tipico 2-6.
-float RETORNO        = 3.0;   // volta GRADUAL ao giro normal ao soltar (baixo = suave, sem corridinha)
+float MOTOR_TORQUE   = 3.5;   // FORCA/firmeza do motor (volts). Maior = mais firme/preso. 2-6.
+float RETORNO        = 8.0;   // rapidez do retorno ao soltar. Maior=firme/direto; baixo=suave (sem zip)
+float DEADBAND       = 1.5;   // folga antes de ceder ao toque. Menor = mais firme/preso ao giro
+float FIRMEZA        = 0.20;  // rigidez do controle (PID P). Maior = mais preso/responsivo (cuidado: chia)
 float SCRATCH_PITCH  = 1.0;   // trim fino de tom (1.0 = normal)
 float SCRATCH_PARADA = 0.02;  // congela o som qdo o prato esta quase parado (anti-ruido)
 float MOTOR_FILTRO   = 0.02;  // suavidade do controle do motor (nao afeta o tom). 0.01 a 0.05
@@ -805,7 +805,7 @@ void setup() {
 
   motor.controller = MotionControlType::velocity;
   motor.voltage_limit = MOTOR_TORQUE;       // <- ajuste de torque (topo do codigo)
-  motor.PID_velocity.P = 0.15;
+  motor.PID_velocity.P = FIRMEZA;           // <- rigidez (topo do codigo)
   motor.PID_velocity.I = 0.2;
   motor.PID_velocity.output_ramp = 100;
   motor.LPF_velocity.Tf = MOTOR_FILTRO;     // <- suavidade do motor (topo do codigo)
