@@ -56,9 +56,8 @@ float gSpeedMult = 1.0f;     // multiplicador de velocidade/tom (long-press: 1.0
 float ALVO_REV_SEG   = 0.7;   // tempo ALVO de 1 volta (s). MENOR = prato mais rapido = MENOS distorcao/wow
 float STEP_SUAVE     = 0.35;  // suavizacao do audio (mata o wow). Menor=mais suave; 1.0=sem suavizar
 float MOTOR_TORQUE   = 4.5;   // torque (V) p/ MANTER o giro / RESISTENCIA no scratch. Maior = mais firme
-float TORQUE_START   = 10.0;  // torque na partida (primeiros 2.5s). Maior = parte mais facil
+float TORQUE_START   = 10.0;  // torque qdo o prato esta DEVAGAR (partida E recuperacao apos scratch). Maior = volta mais forte
 float FIRMEZA        = 0.30;  // rigidez do PID (P). Maior = mais torque p/ partir e mais firme (cuidado: chia)
-float ANTI_WINDUP    = 0.60;  // zera o integral se erro > isto (x nominal). MAIOR = parte melhor; menor = menos corridinha
 float SCRATCH_PARADA = 0.02;  // congela o som qdo o prato esta quase parado (anti-ruido)
 float MOTOR_FILTRO   = 0.02;  // suavidade do controle do motor (nao afeta o tom). 0.01 a 0.05
 float VOLUME_MESTRE  = 0.90;  // volume geral (0.0 a ~1.2)
@@ -971,20 +970,14 @@ void loop() {
 
   float v = motor.shaftVelocity();
 
-  // PARTIDA: usa TORQUE_START e deixa o integral acumular ate o prato pegar velocidade (vence atrito).
-  // Depois de pegar, cai p/ MOTOR_TORQUE normal.
-  static bool started = false;
-  if (!started && fabs(v) > fabs(gTargetVel) * 0.7f) started = true;
-  motor.voltage_limit = started ? MOTOR_TORQUE : TORQUE_START;
+  // TORQUE por velocidade:
+  //  - prato devagar (partida OU recuperacao depois do scratch) -> TORQUE_START (forte, sempre volta a rodar)
+  //  - prato girando normal -> MOTOR_TORQUE
+  // (sem anti-windup: o integral acumula e recupera o giro, como nas versoes que voltavam)
+  motor.voltage_limit = (fabs(v) < fabs(gTargetVel) * 0.4f) ? TORQUE_START : MOTOR_TORQUE;
 
-  // MOTOR mantem a rotacao NOMINAL constante. Voce scratcha contra ele e ele recupera natural.
   setVel = gTargetVel;
   motor.move(setVel);
-
-  // ANTI-WINDUP (so DEPOIS de partir): enquanto voce mexe (erro grande), zera o integral do PID
-  // p/ ele NAO acumular "vontade" e disparar/compensar ao soltar (mata a corridinha).
-  // Na partida fica DESLIGADO -> o integral pode acumular e vencer o atrito -> parte sozinho.
-  if (started && fabs(v - gTargetVel) > fabs(gTargetVel) * ANTI_WINDUP) motor.PID_velocity.reset();
 
   // ----- POSICAO DO AUDIO (GRUDADA no angulo do prato, sem drift) -----
   // O audio segue EXATAMENTE o angulo do prato. Empurra pra frente = acelera (vinil real),
