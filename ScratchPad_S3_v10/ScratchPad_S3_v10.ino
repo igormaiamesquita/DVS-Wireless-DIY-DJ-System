@@ -48,12 +48,11 @@ BLDCMotor motor = BLDCMotor(7);
 BLDCDriver3PWM driver = BLDCDriver3PWM(DRV_IN1, DRV_IN2, DRV_IN3);
 MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
 
-// O SAMPLE decide a velocidade do prato (1 volta = sample, tocando 1x; sample curto loopa).
+// PARAFUSO: o sample inteiro mapeado por VOLTAS_POR_SAMPLE voltas (absoluto/reversivel).
 float gTargetVel = -3.49f;   // recalculado por sample (rad/s, negativo = sentido)
-float gSpeedMult = 1.0f;     // multiplicador de velocidade/tom (long-press: 1.0 <-> 1.35)
 
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
-float ALVO_REV_SEG   = 0.7;   // tempo ALVO de 1 volta (s). MENOR = prato mais rapido = MENOS distorcao/wow
+float VOLTAS_POR_SAMPLE = 1.0; // PARAFUSO: quantas voltas do prato p/ o sample inteiro. Maior=mais espalhado/fino (prato mais rapido)
 float STEP_SUAVE     = 0.35;  // suavizacao do audio (mata o wow). Menor=mais suave; 1.0=sem suavizar
 float MOTOR_TORQUE   = 4.5;   // torque (V) p/ MANTER o giro / RESISTENCIA no scratch. Maior = mais firme
 float TORQUE_START   = 10.0;  // torque qdo o prato esta DEVAGAR (partida E recuperacao apos scratch). Maior = volta mais forte
@@ -273,24 +272,14 @@ int16_t* loadWavToPSRAM(const char* path, int32_t* lenOut) {
 }
 
 // =====================================================
-// Mapeamento angulo->sample (GRUDADO). O prato gira sempre ~ALVO_REV_SEG por volta (rapido o bastante
-// p/ o sensor nao distorcer). Sample curto LOOPA N vezes inteiras/volta; sample longo ocupa N voltas
-// inteiras. Em ambos os casos a marcacao no disco fica consistente.
+// Mapeamento angulo->sample tipo PARAFUSO/ROSCA: o sample inteiro e espalhado por
+// VOLTAS_POR_SAMPLE voltas do prato, de forma continua e absoluta. Girar pra tras volta
+// EXATAMENTE ao mesmo ponto. A velocidade do prato e derivada p/ tocar 1x.
 // =====================================================
 void recalcMap() {
   if (gSampleLen <= 0) return;
-  float sampleSec = (float)gSampleLen / (float)SAMPLE_RATE;
-  double framesPerRev;
-  if (sampleSec >= ALVO_REV_SEG) {                       // sample longo: N voltas inteiras = 1 sample
-    int revs = (int)lroundf(sampleSec / ALVO_REV_SEG); if (revs < 1) revs = 1;
-    framesPerRev = (double)gSampleLen / revs;
-  } else {                                               // sample curto: M loops inteiros por volta
-    int loops = (int)lroundf(ALVO_REV_SEG / sampleSec); if (loops < 1) loops = 1;
-    framesPerRev = (double)loops * (double)gSampleLen;
-  }
-  gFramesPerRad = -framesPerRev / TWO_PI;
-  float revSec = (float)framesPerRev / (float)SAMPLE_RATE;   // ~ALVO_REV_SEG
-  gTargetVel = -(TWO_PI / revSec) * gSpeedMult;             // velocidade p/ tocar 1x
+  gFramesPerRad = -(double)gSampleLen / (VOLTAS_POR_SAMPLE * TWO_PI);              // 1 sample = VOLTAS voltas
+  gTargetVel = -(TWO_PI * VOLTAS_POR_SAMPLE * (float)SAMPLE_RATE / (float)gSampleLen); // rad/s p/ tocar 1x
 }
 
 // =====================================================
