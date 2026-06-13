@@ -48,12 +48,12 @@ BLDCMotor motor = BLDCMotor(7);
 BLDCDriver3PWM driver = BLDCDriver3PWM(DRV_IN1, DRV_IN2, DRV_IN3);
 MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
 
-// O SAMPLE decide a velocidade do prato: 1 volta (x VOLTAS) = sample inteiro, tocando 1x.
+// O SAMPLE decide a velocidade do prato (1 volta = sample, tocando 1x; sample curto loopa).
 float gTargetVel = -3.49f;   // recalculado por sample (rad/s, negativo = sentido)
 float gSpeedMult = 1.0f;     // multiplicador de velocidade/tom (long-press: 1.0 <-> 1.35)
 
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
-float VOLTAS         = 1.0;   // voltas do prato p/ 1 sample. Maior = prato mais devagar (sample longo)
+float MIN_REV_SEG    = 1.5;   // tempo MINIMO de 1 volta (s). Sample mais curto LOOPA p/ nao acelerar o prato
 float MOTOR_TORQUE   = 3.5;   // FORCA/firmeza do motor (volts). Maior = mais firme/preso. 2-6.
 float TORQUE_START   = 6.0;   // torque extra nos primeiros 2.5s p/ GARANTIR a partida do prato
 float RETORNO        = 15.0;  // rapidez do retorno ao soltar. Maior=firme/direto
@@ -275,13 +275,18 @@ int16_t* loadWavToPSRAM(const char* path, int32_t* lenOut) {
 }
 
 // =====================================================
-// Mapeamento angulo->sample: 1 volta (x VOLTAS) = sample inteiro (GRUDADO no prato).
+// Mapeamento angulo->sample (GRUDADO). Sample curto (< MIN_REV_SEG) loopa N vezes inteiras por volta,
 // E a velocidade do prato e derivada do sample p/ tocar 1x. -> o SAMPLE decide a rotacao.
 // =====================================================
 void recalcMap() {
   if (gSampleLen <= 0) return;
-  gFramesPerRad = -(double)gSampleLen / (VOLTAS * TWO_PI);                       // frames por radiano
-  gTargetVel = -(TWO_PI * VOLTAS * (float)SAMPLE_RATE / (float)gSampleLen) * gSpeedMult; // rad/s p/ 1x
+  float sampleSec = (float)gSampleLen / (float)SAMPLE_RATE;
+  int loops = 1;
+  if (sampleSec < MIN_REV_SEG) loops = (int)ceilf(MIN_REV_SEG / sampleSec);   // curto: loopa p/ encher a volta
+  double framesPerRev = (double)loops * (double)gSampleLen;                    // frames de audio em 1 volta
+  gFramesPerRad = -framesPerRev / TWO_PI;
+  float revSec = (float)framesPerRev / (float)SAMPLE_RATE;                     // duracao de 1 volta (>= MIN_REV_SEG)
+  gTargetVel = -(TWO_PI / revSec) * gSpeedMult;                               // velocidade p/ tocar 1x
 }
 
 // =====================================================
