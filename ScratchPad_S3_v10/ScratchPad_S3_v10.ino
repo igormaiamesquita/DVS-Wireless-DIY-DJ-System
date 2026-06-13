@@ -226,15 +226,20 @@ int16_t* loadWavToPSRAM(const char* path, int32_t* lenOut) {
   uint32_t totalSamples = dataSize / 2;
   int32_t len = (channels == 2) ? totalSamples / 2 : totalSamples;
 
-  int16_t* buf = (int16_t*)heap_caps_malloc(len * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+  // PARAFUSO: completa com SILENCIO ate um numero INTEIRO de voltas do prato.
+  // Assim a velocidade do prato e fixa E a marca bate sempre no mesmo ponto.
+  int32_t revFrames = (int32_t)(SEG_POR_VOLTA * SAMPLE_RATE);
+  if (revFrames < 1) revFrames = 1;
+  int32_t paddedLen = ((len + revFrames - 1) / revFrames) * revFrames;
+
+  int16_t* buf = (int16_t*)heap_caps_malloc(paddedLen * sizeof(int16_t), MALLOC_CAP_SPIRAM);
   if (!buf) {
-    // sem PSRAM (ou cheia)? tenta RAM interna - sample curto ainda toca
-    buf = (int16_t*)heap_caps_malloc(len * sizeof(int16_t), MALLOC_CAP_8BIT);
+    buf = (int16_t*)heap_caps_malloc(paddedLen * sizeof(int16_t), MALLOC_CAP_8BIT);
     if (buf) Serial.println("AVISO: sample na RAM interna (PSRAM indisponivel?)");
   }
   if (!buf) {
     Serial.printf("Sample grande demais: precisa %d KB, livre na PSRAM %d KB.\n",
-                  (int)(len * 2 / 1024),
+                  (int)(paddedLen * 2 / 1024),
                   (int)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
     Serial.println("Use WAV mais curto (16-bit MONO 22050 Hz).");
     f.close(); return nullptr;
@@ -257,7 +262,10 @@ int16_t* loadWavToPSRAM(const char* path, int32_t* lenOut) {
   }
   f.close();
 
-  // suaviza as pontas (~5ms) p/ o LOOP nao dar estalo na emenda
+  // preenche o resto da(s) volta(s) com SILENCIO
+  for (int32_t i = len; i < paddedLen; i++) buf[i] = 0;
+
+  // suaviza as pontas do SAMPLE (~5ms) p/ nao dar estalo na emenda com o silencio
   int fade = SAMPLE_RATE / 200;
   if (fade * 2 < len) {
     for (int i = 0; i < fade; i++) {
@@ -267,7 +275,9 @@ int16_t* loadWavToPSRAM(const char* path, int32_t* lenOut) {
     }
   }
 
-  if (lenOut) *lenOut = len;
+  Serial.printf("Sample %d frames -> buffer %d (%.0f%% som, resto silencio), %d volta(s)\n",
+                len, paddedLen, 100.0f * len / paddedLen, paddedLen / revFrames);
+  if (lenOut) *lenOut = paddedLen;
   return buf;
 }
 
@@ -314,10 +324,10 @@ int scanFolder(const char* dir, String* list, int maxN) {
 // Sample de teste (fallback sem SD)
 // =====================================================
 void gerarSampleTeste() {
-  float secs = 1.0f;
+  float secs = SEG_POR_VOLTA;                 // 1 volta exata
   gSampleLen = (int32_t)(secs * SAMPLE_RATE);
   gSample = (int16_t*)heap_caps_malloc(gSampleLen * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-  if (!gSample)  // sem PSRAM? gera na RAM interna (1s = ~44KB, cabe)
+  if (!gSample)  // sem PSRAM? gera na RAM interna
     gSample = (int16_t*)heap_caps_malloc(gSampleLen * sizeof(int16_t), MALLOC_CAP_8BIT);
   if (!gSample) { gSampleLen = 0; return; }
   for (int32_t i = 0; i < gSampleLen; i++) {
@@ -330,7 +340,7 @@ void gerarSampleTeste() {
     if (t > secs - 0.02f) env = (secs - t) / 0.02f;
     gSample[i] = (int16_t)(v * env * 27500.0f);
   }
-  Serial.println("Fallback: sample de teste gerado.");
+  Serial.println("Fallback: sample de teste gerado (1 volta).");
 }
 
 // =====================================================
