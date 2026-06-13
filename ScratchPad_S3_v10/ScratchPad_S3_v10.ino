@@ -932,12 +932,8 @@ void onButton(int i) {                 // clique CURTO
                 i + 1, beatIndex, gBeatPlaying, gVol, gMuteScratch, gRecording);
 }
 
-void onButtonLong(int i) {             // segurar (long-press)
-  if (i == 2) {                        // botao 3 = alterna velocidade/tom (normal <-> rapido)
-    gSpeedMult = (gSpeedMult == 1.0f) ? 1.35f : 1.0f;
-    recalcMap();                       // re-deriva a rotacao do prato
-    Serial.printf("Velocidade: %s\n", (gSpeedMult == 1.0f) ? "normal" : "rapida (+35%)");
-  }
+void onButtonLong(int i) {             // segurar (long-press) - sem funcao por enquanto
+  (void)i;
 }
 
 void lerBotoes() {
@@ -977,10 +973,14 @@ void loop() {
 
   float v = motor.shaftVelocity();
 
-  // MOTOR mantem a rotacao NOMINAL constante (sem rampa/aceleracao artificial p/ "compensar").
-  // Voce scratcha contra ele (ele cede pelo torque baixo) e ele recupera de forma natural ao soltar.
+  // MOTOR mantem a rotacao NOMINAL constante. Voce scratcha contra ele e ele recupera natural.
   setVel = gTargetVel;
   motor.move(setVel);
+
+  // ANTI-WINDUP: enquanto voce mexe (erro grande), zera o integral do PID p/ ele NAO acumular
+  // "vontade" e disparar/compensar ao soltar (mata a corridinha). No giro livre, o integral
+  // trabalha normal -> corrige o tom p/ ficar exatamente no 1x (sem ficar abaixo).
+  if (fabs(v - gTargetVel) > fabs(gTargetVel) * 0.30f) motor.PID_velocity.reset();
 
   // ----- POSICAO DO AUDIO (GRUDADA no angulo do prato, sem drift) -----
   // O audio segue EXATAMENTE o angulo do prato. Empurra pra frente = acelera (vinil real),
