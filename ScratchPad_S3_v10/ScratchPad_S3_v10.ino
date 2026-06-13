@@ -671,12 +671,12 @@ String paginaHtml() {
   h += "<h3>1) Atualizar firmware (.bin)</h3>";
   h += "<form method='POST' action='/update' enctype='multipart/form-data'>";
   h += "<input type='file' name='f' accept='.bin'> <input type='submit' value='Atualizar'></form>";
-  h += "<h3>2) Enviar WAV p/ /scratch</h3>";
+  h += "<h3>2) Enviar WAV p/ /scratch (pode escolher VARIOS)</h3>";
   h += "<form method='POST' action='/upload?folder=scratch' enctype='multipart/form-data'>";
-  h += "<input type='file' name='f' accept='.wav'> <input type='submit' value='Enviar'></form>";
-  h += "<h3>3) Enviar WAV p/ /beats</h3>";
+  h += "<input type='file' name='f' accept='.wav' multiple> <input type='submit' value='Enviar'></form>";
+  h += "<h3>3) Enviar WAV p/ /beats (pode escolher VARIOS)</h3>";
   h += "<form method='POST' action='/upload?folder=beats' enctype='multipart/form-data'>";
-  h += "<input type='file' name='f' accept='.wav'> <input type='submit' value='Enviar'></form>";
+  h += "<input type='file' name='f' accept='.wav' multiple> <input type='submit' value='Enviar'></form>";
   h += "<h3>Gravacoes</h3><ul>" + listaPasta("/records") + "</ul>";
   h += "<h3>/scratch</h3><ul>" + listaPasta("/scratch") + "</ul>";
   h += "<h3>/beats</h3><ul>" + listaPasta("/beats") + "</ul>";
