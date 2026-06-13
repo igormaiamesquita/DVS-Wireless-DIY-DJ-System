@@ -48,17 +48,15 @@ BLDCMotor motor = BLDCMotor(7);
 BLDCDriver3PWM driver = BLDCDriver3PWM(DRV_IN1, DRV_IN2, DRV_IN3);
 MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
 
-// Velocidades padrao de toca-disco (rad/s; negativo = sentido). Long-press no botao 3 alterna.
-float SPEED_33 = -3.49f;   // 33 1/3 RPM  (~1.8s de audio por volta)
-float SPEED_45 = -4.71f;   // 45 RPM
-float gTargetVel = SPEED_33;          // alvo atual do prato (alterna 33/45)
-#define NOMINAL_VEL SPEED_33          // referencia de TOM 1x (sempre o 33; no 45 toca mais agudo)
+// O SAMPLE decide a velocidade do prato: 1 volta (x VOLTAS) = sample inteiro, tocando 1x.
+float gTargetVel = -3.49f;   // recalculado por sample (rad/s, negativo = sentido)
+float gSpeedMult = 1.0f;     // multiplicador de velocidade/tom (long-press: 1.0 <-> 1.35)
 
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
+float VOLTAS         = 1.0;   // voltas do prato p/ 1 sample. Maior = prato mais devagar (sample longo)
 float MOTOR_TORQUE   = 3.5;   // FORCA/firmeza do motor (volts). Maior = mais firme/preso. 2-6.
 float TORQUE_START   = 6.0;   // torque extra nos primeiros 2.5s p/ GARANTIR a partida do prato
 float RETORNO        = 15.0;  // rapidez do retorno ao soltar. Maior=firme/direto
-float FWD_THRESH     = 0.10;  // prato girando pra FRENTE acima disso -> som toca 1x (sem corridinha)
 float DEADBAND       = 0.5;   // folga antes de ceder ao toque. Menor = mais firme/preso ao giro
 float FIRMEZA        = 0.20;  // rigidez do controle (PID P). Maior = mais preso/responsivo (cuidado: chia)
 float SCRATCH_PITCH  = 1.0;   // trim fino de tom (1.0 = normal)
@@ -128,11 +126,10 @@ int32_t  gSampleLen = 0;
 volatile bool gAudioReady = false;     // false durante troca de sample -> silencio
 volatile int32_t scratchPos = 0;       // (legado, nao usado no position-lock)
 
-// --- POSITION-LOCK: audio colado na POSICAO do prato (agulha fixa) ---
-// gFramesPerRad: tom normal (1.0x no giro nominal)
-double gFramesPerRad = (double)SAMPLE_RATE / NOMINAL_VEL;
+// --- POSITION-LOCK: audio colado na POSICAO ABSOLUTA do prato (agulha fixa, sem drift) ---
+double gFramesPerRad = -100.0;          // recalculado por sample (recalcMap)
 portMUX_TYPE posMux = portMUX_INITIALIZER_UNLOCKED;
-volatile double gScratchTarget = 0.0;  // posicao do prato em frames (cumulativo)
+volatile double gScratchTarget = 0.0;  // posicao do prato em frames
 
 // =====================================================
 // Lista de arquivos /scratch
@@ -278,10 +275,13 @@ int16_t* loadWavToPSRAM(const char* path, int32_t* lenOut) {
 }
 
 // =====================================================
-// Mapeamento angulo->sample (TOM NORMAL = 1.0x no giro nominal)
+// Mapeamento angulo->sample: 1 volta (x VOLTAS) = sample inteiro (GRUDADO no prato).
+// E a velocidade do prato e derivada do sample p/ tocar 1x. -> o SAMPLE decide a rotacao.
 // =====================================================
 void recalcMap() {
-  gFramesPerRad = (double)SAMPLE_RATE / NOMINAL_VEL;
+  if (gSampleLen <= 0) return;
+  gFramesPerRad = -(double)gSampleLen / (VOLTAS * TWO_PI);                       // frames por radiano
+  gTargetVel = -(TWO_PI * VOLTAS * (float)SAMPLE_RATE / (float)gSampleLen) * gSpeedMult; // rad/s p/ 1x
 }
 
 // =====================================================
@@ -589,8 +589,11 @@ void audioTask(void *param) {
     if (!aInit) { lastTarget = target; aInit = true; }
 
     double step = (target - lastTarget) / FRAMES;
-    lastTarget = target;
-    if (fabs(step) < SCRATCH_PARADA) step = 0.0;
+    if (fabs(step) < SCRATCH_PARADA) {
+      step = 0.0;                 // quase parado: congela MAS nao consome o movimento
+    } else {                      // (lastTarget so avanca quando aplica -> SEM drift)
+      lastTarget = target;
+    }
     const double MAXSTEP = 32.0;
     if (step >  MAXSTEP) step =  MAXSTEP;
     if (step < -MAXSTEP) step = -MAXSTEP;
@@ -918,9 +921,10 @@ void onButton(int i) {                 // clique CURTO
 }
 
 void onButtonLong(int i) {             // segurar (long-press)
-  if (i == 2) {                        // botao 3 = alterna velocidade
-    gTargetVel = (gTargetVel == SPEED_33) ? SPEED_45 : SPEED_33;
-    Serial.printf("Velocidade: %s RPM\n", (gTargetVel == SPEED_33) ? "33" : "45");
+  if (i == 2) {                        // botao 3 = alterna velocidade/tom (normal <-> rapido)
+    gSpeedMult = (gSpeedMult == 1.0f) ? 1.35f : 1.0f;
+    recalcMap();                       // re-deriva a rotacao do prato
+    Serial.printf("Velocidade: %s\n", (gSpeedMult == 1.0f) ? "normal" : "rapida (+35%)");
   }
 }
 
@@ -978,28 +982,20 @@ void loop() {
   setVel = setDir * dir;
   motor.move(setVel);
 
-  // ----- POSICAO DO AUDIO -----
-  // Prato indo PRA FRENTE (>= FWD_THRESH do nominal) -> toca 1x (sem corridinha no retorno).
-  // Segurando / parado / reverso -> scratch colado no angulo do prato (resposta imediata).
+  // ----- POSICAO DO AUDIO (GRUDADA no angulo do prato, sem drift) -----
+  // O audio segue EXATAMENTE o angulo do prato. Empurra pra frente = acelera (vinil real),
+  // puxa pra tras = reverso, segura = congela. A marcacao no disco vira referencia fixa.
   static float lastAngle = 0.0f;
   static bool angInit = false;
   float ang = motor.shaftAngle();
   if (!angInit) { lastAngle = ang; angInit = true; }
   float dA = ang - lastAngle;
   lastAngle = ang;
-
-  float vRatio = v / NOMINAL_VEL;            // 1.0 = girando pra frente no nominal; <0 = reverso
-  double inc;
-  if (vRatio > FWD_THRESH) {
-    inc = (double)SAMPLE_RATE * dt * SCRATCH_PITCH;       // toca 1x pra frente
-  } else {
-    inc = (double)dA * gFramesPerRad * SCRATCH_PITCH;     // scratch (segue o prato)
-  }
   portENTER_CRITICAL(&posMux);
-  gScratchTarget += inc;
+  gScratchTarget += (double)dA * gFramesPerRad;   // soma EXATA = posicao absoluta (nao escorrega)
   portEXIT_CRITICAL(&posMux);
 
-  gSpeedFactor = vRatio;   // so p/ debug
+  gSpeedFactor = v / gTargetVel;   // so p/ debug
 
   // debug: v=velocidade  cut=crossfader cortando  mute=botao mute  ready=sample carregado
   static uint32_t tDbg = 0;
