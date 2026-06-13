@@ -864,9 +864,9 @@ void setup() {
 
   motor.controller = MotionControlType::velocity;
   motor.voltage_limit = MOTOR_TORQUE;       // <- ajuste de torque (topo do codigo)
-  motor.PID_velocity.P = FIRMEZA;           // <- rigidez (topo do codigo)
-  motor.PID_velocity.I = 0.2;
-  motor.PID_velocity.output_ramp = 100;
+  motor.PID_velocity.P = FIRMEZA;           // <- forca da "mola" (topo do codigo)
+  motor.PID_velocity.I = 0;                 // SEM integral -> nao acumula forca -> SEM corridinha
+  motor.PID_velocity.output_ramp = 100000;  // sem rampa de saida (resposta direta)
   motor.LPF_velocity.Tf = MOTOR_FILTRO;     // <- suavidade do motor (topo do codigo)
 
   motor.init();
