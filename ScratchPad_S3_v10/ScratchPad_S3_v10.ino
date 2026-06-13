@@ -650,9 +650,8 @@ String listaPasta(const char* dir) {
         String base = nm; int sl = base.lastIndexOf('/'); if (sl >= 0) base = base.substring(sl + 1);
         if (!base.startsWith(".")) {
           String full = nm.startsWith("/") ? nm : (String(dir) + "/" + base);
-          s += "<li><a href='/dl?p=" + full + "'>" + base + "</a> (" + String(e.size() / 1024) + " KB) ";
-          s += "<a href='/del?p=" + full + "' onclick='return confirm(\"Apagar " + base + " ?\")' "
-               "style='color:red'>[apagar]</a></li>";
+          s += "<li><input type='checkbox' name='del' value='" + full + "'> ";
+          s += "<a href='/dl?p=" + full + "'>" + base + "</a> (" + String(e.size() / 1024) + " KB)</li>";
         }
       }
       e = d.openNextFile();
@@ -682,9 +681,13 @@ String paginaHtml() {
   h += "<h3>3) Enviar WAV p/ /beats (pode escolher VARIOS)</h3>";
   h += "<form method='POST' action='/upload?folder=beats' enctype='multipart/form-data'>";
   h += "<input type='file' name='f' accept='.wav' multiple> <input type='submit' value='Enviar'></form>";
+  h += "<hr><form method='POST' action='/delsel'>";
+  h += "<b>Marque os arquivos e apague de uma vez:</b>";
   h += "<h3>Gravacoes</h3><ul>" + listaPasta("/records") + "</ul>";
   h += "<h3>/scratch</h3><ul>" + listaPasta("/scratch") + "</ul>";
   h += "<h3>/beats</h3><ul>" + listaPasta("/beats") + "</ul>";
+  h += "<input type='submit' value='APAGAR SELECIONADOS' style='color:red;font-weight:bold' ";
+  h += "onclick='return confirm(\"Apagar os selecionados?\")'></form>";
   h += "</body></html>";
   return h;
 }
@@ -710,6 +713,20 @@ void handleDelete() {
   server.send(303);
 }
 
+void handleDeleteSelected() {
+  int n = server.args();
+  int apagados = 0;
+  for (int i = 0; i < n; i++) {
+    if (server.argName(i) == "del") {
+      if (SD.remove(server.arg(i).c_str())) apagados++;
+      Serial.printf("Apagar %s\n", server.arg(i).c_str());
+    }
+  }
+  Serial.printf("Apagados: %d\n", apagados);
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
 void maintenanceMode() {
   Serial.println("=== MODO MANUTENCAO ===");
 
@@ -724,6 +741,7 @@ void maintenanceMode() {
   server.on("/", []() { server.send(200, "text/html", paginaHtml()); });
   server.on("/dl", handleDownload);
   server.on("/del", handleDelete);
+  server.on("/delsel", HTTP_POST, handleDeleteSelected);
 
   // --- OTA firmware ---
   server.on("/update", HTTP_POST,
