@@ -52,7 +52,7 @@ MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
 float gTargetVel = -3.49f;   // recalculado por sample (rad/s, negativo = sentido)
 
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
-float VOLTAS_POR_SAMPLE = 1.0; // PARAFUSO: quantas voltas do prato p/ o sample inteiro. Maior=mais espalhado/fino (prato mais rapido)
+float SEG_POR_VOLTA  = 0.9;   // VELOCIDADE do prato: segundos por volta (fixo). Maior = mais devagar
 float STEP_SUAVE     = 0.35;  // suavizacao do audio (mata o wow). Menor=mais suave; 1.0=sem suavizar
 float MOTOR_TORQUE   = 4.5;   // torque (V) p/ MANTER o giro / RESISTENCIA no scratch. Maior = mais firme
 float TORQUE_START   = 10.0;  // torque qdo o prato esta DEVAGAR (partida E recuperacao apos scratch). Maior = volta mais forte
@@ -272,14 +272,13 @@ int16_t* loadWavToPSRAM(const char* path, int32_t* lenOut) {
 }
 
 // =====================================================
-// Mapeamento angulo->sample tipo PARAFUSO/ROSCA: o sample inteiro e espalhado por
-// VOLTAS_POR_SAMPLE voltas do prato, de forma continua e absoluta. Girar pra tras volta
-// EXATAMENTE ao mesmo ponto. A velocidade do prato e derivada p/ tocar 1x.
+// PARAFUSO com velocidade FIXA: o prato gira sempre SEG_POR_VOLTA segundos por volta
+// (velocidade independente do tamanho do sample). O sample e mapeado de forma continua e
+// absoluta em cima do angulo -> girar pra tras volta EXATO. Toca a 1x.
 // =====================================================
 void recalcMap() {
-  if (gSampleLen <= 0) return;
-  gFramesPerRad = -(double)gSampleLen / (VOLTAS_POR_SAMPLE * TWO_PI);              // 1 sample = VOLTAS voltas
-  gTargetVel = -(TWO_PI * VOLTAS_POR_SAMPLE * (float)SAMPLE_RATE / (float)gSampleLen); // rad/s p/ tocar 1x
+  gFramesPerRad = -(double)SEG_POR_VOLTA * (double)SAMPLE_RATE / TWO_PI;  // frames de audio por radiano (1x)
+  gTargetVel = -(TWO_PI / SEG_POR_VOLTA);                                 // rad/s p/ a volta durar SEG_POR_VOLTA
 }
 
 // =====================================================
