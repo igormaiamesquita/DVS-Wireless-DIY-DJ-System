@@ -48,13 +48,16 @@ BLDCMotor motor = BLDCMotor(7);
 BLDCDriver3PWM driver = BLDCDriver3PWM(DRV_IN1, DRV_IN2, DRV_IN3);
 MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
 
-const float TARGET_VEL  = -12.0;   // velocidade de giro do prato (rad/s); sinal = sentido
-const float NOMINAL_VEL = TARGET_VEL;
+// Velocidades padrao de toca-disco (rad/s; negativo = sentido). Long-press no botao 3 alterna.
+float SPEED_33 = -3.49f;   // 33 1/3 RPM  (~1.8s de audio por volta)
+float SPEED_45 = -4.71f;   // 45 RPM
+float gTargetVel = SPEED_33;          // alvo atual do prato (alterna 33/45)
+#define NOMINAL_VEL SPEED_33          // referencia de TOM 1x (sempre o 33; no 45 toca mais agudo)
 
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
 float MOTOR_TORQUE   = 3.5;   // FORCA/firmeza do motor (volts). Maior = mais firme/preso. 2-6.
-float RETORNO        = 8.0;   // rapidez do retorno ao soltar. Maior=firme/direto; baixo=suave (sem zip)
-float DEADBAND       = 1.5;   // folga antes de ceder ao toque. Menor = mais firme/preso ao giro
+float RETORNO        = 6.0;   // rapidez do retorno ao soltar. Maior=firme/direto; baixo=suave
+float DEADBAND       = 0.5;   // folga antes de ceder ao toque. Menor = mais firme/preso ao giro
 float FIRMEZA        = 0.20;  // rigidez do controle (PID P). Maior = mais preso/responsivo (cuidado: chia)
 float SCRATCH_PITCH  = 1.0;   // trim fino de tom (1.0 = normal)
 float SCRATCH_PARADA = 0.02;  // congela o som qdo o prato esta quase parado (anti-ruido)
@@ -856,11 +859,11 @@ void lerEncoder() {
 }
 
 // =====================================================
-// BOTOES (debounce simples) -- funcoes FINAIS
-//   1(GPIO21)=proxima batida   2(GPIO47)=batida anterior   3(GPIO48)=play/pause
-//   4(GPIO14)=mute scratch     5(GPIO2)=volume (cicla)     6(GPIO0)=GRAVAR (start/stop)
+// BOTOES -- clique CURTO + LONG-PRESS
+//   curto: 1=proxima batida 2=batida anterior 3=play/pause 4=mute 5=volume 6=GRAVAR
+//   LONG:  3 = alterna 33/45 RPM
 // =====================================================
-void onButton(int i) {
+void onButton(int i) {                 // clique CURTO
   switch (i) {
     case 0: gBeatReq = +1; break;                                       // proxima batida
     case 1: gBeatReq = -1; break;                                       // batida anterior
@@ -873,14 +876,26 @@ void onButton(int i) {
                 i + 1, beatIndex, gBeatPlaying, gVol, gMuteScratch, gRecording);
 }
 
+void onButtonLong(int i) {             // segurar (long-press)
+  if (i == 2) {                        // botao 3 = alterna velocidade
+    gTargetVel = (gTargetVel == SPEED_33) ? SPEED_45 : SPEED_33;
+    Serial.printf("Velocidade: %s RPM\n", (gTargetVel == SPEED_33) ? "33" : "45");
+  }
+}
+
 void lerBotoes() {
   static bool last[6] = {HIGH,HIGH,HIGH,HIGH,HIGH,HIGH};
-  static uint32_t t[6] = {0,0,0,0,0,0};
+  static uint32_t pressT[6] = {0,0,0,0,0,0};
+  static bool longFired[6] = {false,false,false,false,false,false};
+  const uint32_t LONGMS = 700;
   for (int i = 0; i < 6; i++) {
     bool s = digitalRead(BTN_PINS[i]);
-    if (last[i] == HIGH && s == LOW && millis() - t[i] > 200) {
-      t[i] = millis();
-      onButton(i);
+    if (last[i] == HIGH && s == LOW) {            // pressionou
+      pressT[i] = millis(); longFired[i] = false;
+    } else if (last[i] == LOW && s == LOW) {      // segurando
+      if (!longFired[i] && millis() - pressT[i] >= LONGMS) { longFired[i] = true; onButtonLong(i); }
+    } else if (last[i] == LOW && s == HIGH) {     // soltou
+      if (!longFired[i] && millis() - pressT[i] >= 30) onButton(i);   // clique curto
     }
     last[i] = s;
   }
@@ -903,10 +918,10 @@ void loop() {
   float v = motor.shaftVelocity();
 
   // setpoint que escorrega (logica ORIGINAL do v8, comprovada: da partida e cede ao segurar)
-  float dir    = (TARGET_VEL < 0) ? -1.0f : 1.0f;
+  float dir    = (gTargetVel < 0) ? -1.0f : 1.0f;
   float vDir   = v * dir;
   float setDir = setVel * dir;
-  float tgtDir = fabs(TARGET_VEL);
+  float tgtDir = fabs(gTargetVel);
 
   if (vDir < setDir - DEADBAND) {
     setDir = vDir + DEADBAND;              // prato freado -> setpoint cede (mas mantem torque p/ subir)
