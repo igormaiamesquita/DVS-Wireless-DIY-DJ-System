@@ -53,6 +53,7 @@ float gTargetVel = -3.49f;   // recalculado por sample (rad/s, negativo = sentid
 
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
 float SEG_POR_VOLTA  = 0.9;   // VELOCIDADE do prato: segundos por volta (fixo). Maior = mais devagar
+float COMP_VEL       = 1.0;   // TOM: compensa a perda do motor. Sobe um pouco (1.05, 1.1) se o tom estiver baixo
 float STEP_SUAVE     = 0.35;  // suavizacao do audio (mata o wow). Menor=mais suave; 1.0=sem suavizar
 float MOTOR_TORQUE   = 4.5;   // torque (V) p/ MANTER o giro / RESISTENCIA no scratch. Maior = mais firme
 float TORQUE_START   = 10.0;  // torque qdo o prato esta DEVAGAR (partida E recuperacao apos scratch). Maior = volta mais forte
@@ -974,7 +975,7 @@ void loop() {
   // (sem anti-windup: o integral acumula e recupera o giro, como nas versoes que voltavam)
   motor.voltage_limit = (fabs(v) < fabs(gTargetVel) * 0.4f) ? TORQUE_START : MOTOR_TORQUE;
 
-  setVel = gTargetVel;
+  setVel = gTargetVel * COMP_VEL;   // COMP_VEL compensa a perda do motor (P puro) -> acerta o TOM
   motor.move(setVel);
 
   // ----- POSICAO DO AUDIO (GRUDADA no angulo do prato, sem drift) -----
