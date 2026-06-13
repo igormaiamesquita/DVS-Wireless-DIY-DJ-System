@@ -54,11 +54,9 @@ float gSpeedMult = 1.0f;     // multiplicador de velocidade/tom (long-press: 1.0
 
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
 float MIN_REV_SEG    = 1.5;   // tempo MINIMO de 1 volta (s). Sample mais curto LOOPA p/ nao acelerar o prato
-float MOTOR_TORQUE   = 3.5;   // FORCA/firmeza do motor (volts). Maior = mais firme/preso. 2-6.
+float MOTOR_TORQUE   = 2.5;   // torque (V) p/ MANTER o giro. Baixo = cede facil ao scratch e recupera suave
 float TORQUE_START   = 6.0;   // torque extra nos primeiros 2.5s p/ GARANTIR a partida do prato
-float RETORNO        = 15.0;  // rapidez do retorno ao soltar. Maior=firme/direto
-float DEADBAND       = 0.5;   // folga antes de ceder ao toque. Menor = mais firme/preso ao giro
-float FIRMEZA        = 0.20;  // rigidez do controle (PID P). Maior = mais preso/responsivo (cuidado: chia)
+float FIRMEZA        = 0.15;  // rigidez do controle (PID P). Maior = mais preso/responsivo (cuidado: chia)
 float SCRATCH_PITCH  = 1.0;   // trim fino de tom (1.0 = normal)
 float SCRATCH_PARADA = 0.02;  // congela o som qdo o prato esta quase parado (anti-ruido)
 float MOTOR_FILTRO   = 0.02;  // suavidade do controle do motor (nao afeta o tom). 0.01 a 0.05
@@ -970,21 +968,9 @@ void loop() {
 
   float v = motor.shaftVelocity();
 
-  // setpoint que escorrega (logica ORIGINAL do v8, comprovada: da partida e cede ao segurar)
-  float dir    = (gTargetVel < 0) ? -1.0f : 1.0f;
-  float vDir   = v * dir;
-  float setDir = setVel * dir;
-  float tgtDir = fabs(gTargetVel);
-
-  if (vDir < setDir - DEADBAND) {
-    setDir = vDir + DEADBAND;              // prato freado -> setpoint cede (mas mantem torque p/ subir)
-  } else {
-    setDir += RETORNO * dt;               // livre -> volta ao giro normal (RETORNO alto = quase na hora)
-    if (setDir > tgtDir) setDir = tgtDir;
-  }
-  if (setDir < 0) setDir = 0;
-
-  setVel = setDir * dir;
+  // MOTOR mantem a rotacao NOMINAL constante (sem rampa/aceleracao artificial p/ "compensar").
+  // Voce scratcha contra ele (ele cede pelo torque baixo) e ele recupera de forma natural ao soltar.
+  setVel = gTargetVel;
   motor.move(setVel);
 
   // ----- POSICAO DO AUDIO (GRUDADA no angulo do prato, sem drift) -----
