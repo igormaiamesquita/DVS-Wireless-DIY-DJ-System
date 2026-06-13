@@ -650,7 +650,9 @@ String listaPasta(const char* dir) {
         String base = nm; int sl = base.lastIndexOf('/'); if (sl >= 0) base = base.substring(sl + 1);
         if (!base.startsWith(".")) {
           String full = nm.startsWith("/") ? nm : (String(dir) + "/" + base);
-          s += "<li><a href='/dl?p=" + full + "'>" + base + "</a> (" + String(e.size() / 1024) + " KB)</li>";
+          s += "<li><a href='/dl?p=" + full + "'>" + base + "</a> (" + String(e.size() / 1024) + " KB) ";
+          s += "<a href='/del?p=" + full + "' onclick='return confirm(\"Apagar " + base + " ?\")' "
+               "style='color:red'>[apagar]</a></li>";
         }
       }
       e = d.openNextFile();
@@ -699,6 +701,15 @@ void handleDownload() {
   f.close();
 }
 
+void handleDelete() {
+  if (server.hasArg("p")) {
+    bool ok = SD.remove(server.arg("p").c_str());
+    Serial.printf("Apagar %s -> %s\n", server.arg("p").c_str(), ok ? "ok" : "falhou");
+  }
+  server.sendHeader("Location", "/");   // volta pra lista atualizada
+  server.send(303);
+}
+
 void maintenanceMode() {
   Serial.println("=== MODO MANUTENCAO ===");
 
@@ -712,6 +723,7 @@ void maintenanceMode() {
 
   server.on("/", []() { server.send(200, "text/html", paginaHtml()); });
   server.on("/dl", handleDownload);
+  server.on("/del", handleDelete);
 
   // --- OTA firmware ---
   server.on("/update", HTTP_POST,
