@@ -56,7 +56,9 @@ float gTargetVel = SPEED_33;          // alvo atual do prato (alterna 33/45)
 
 // >>>>>>>>>>>>>>>> AJUSTES RAPIDOS (mexa aqui) <<<<<<<<<<<<<<<<
 float MOTOR_TORQUE   = 3.5;   // FORCA/firmeza do motor (volts). Maior = mais firme/preso. 2-6.
-float RETORNO        = 6.0;   // rapidez do retorno ao soltar. Maior=firme/direto; baixo=suave
+float TORQUE_START   = 6.0;   // torque extra nos primeiros 2.5s p/ GARANTIR a partida do prato
+float RETORNO        = 15.0;  // rapidez do retorno ao soltar. Maior=firme/direto
+float FWD_THRESH     = 0.10;  // prato girando pra FRENTE acima disso -> som toca 1x (sem corridinha)
 float DEADBAND       = 0.5;   // folga antes de ceder ao toque. Menor = mais firme/preso ao giro
 float FIRMEZA        = 0.20;  // rigidez do controle (PID P). Maior = mais preso/responsivo (cuidado: chia)
 float SCRATCH_PITCH  = 1.0;   // trim fino de tom (1.0 = normal)
@@ -672,6 +674,8 @@ String paginaHtml() {
   h += "<br><b>Heap livre:</b> " + String(ESP.getFreeHeap() / 1024) + " KB";
   h += "<br><b>Versao:</b> " + String(__DATE__) + " " + String(__TIME__);
   h += "</p>";
+  h += "<p><a href='/restart' onclick='return confirm(\"Reiniciar o equipamento?\")'>";
+  h += "<button style='color:#fff;background:#c00;padding:8px;font-weight:bold'>REINICIAR EQUIPAMENTO</button></a></p>";
   h += "<h3>1) Atualizar firmware (.bin)</h3>";
   h += "<form method='POST' action='/update' enctype='multipart/form-data'>";
   h += "<input type='file' name='f' accept='.bin'> <input type='submit' value='Atualizar'></form>";
@@ -713,6 +717,12 @@ void handleDelete() {
   server.send(303);
 }
 
+void handleRestart() {
+  server.send(200, "text/html", "Reiniciando... aguarde uns segundos e reconecte. <a href='/'>voltar</a>");
+  delay(500);
+  ESP.restart();
+}
+
 void handleDeleteSelected() {
   int n = server.args();
   int apagados = 0;
@@ -742,6 +752,7 @@ void maintenanceMode() {
   server.on("/dl", handleDownload);
   server.on("/del", handleDelete);
   server.on("/delsel", HTTP_POST, handleDeleteSelected);
+  server.on("/restart", handleRestart);
 
   // --- OTA firmware ---
   server.on("/update", HTTP_POST,
@@ -941,6 +952,9 @@ float setVel = 0;
 void loop() {
   motor.loopFOC();
 
+  // empurrao de torque nos primeiros 2.5s -> garante a partida do prato
+  motor.voltage_limit = (millis() < 2500) ? TORQUE_START : MOTOR_TORQUE;
+
   unsigned long now = micros();
   float dt = (lastMicros == 0) ? 0 : (now - lastMicros) * 1e-6f;
   lastMicros = now;
@@ -964,18 +978,28 @@ void loop() {
   setVel = setDir * dir;
   motor.move(setVel);
 
-  // POSITION-LOCK: integra o ANGULO real do prato (sem filtro = resposta imediata)
+  // ----- POSICAO DO AUDIO -----
+  // Prato indo PRA FRENTE (>= FWD_THRESH do nominal) -> toca 1x (sem corridinha no retorno).
+  // Segurando / parado / reverso -> scratch colado no angulo do prato (resposta imediata).
   static float lastAngle = 0.0f;
   static bool angInit = false;
   float ang = motor.shaftAngle();
   if (!angInit) { lastAngle = ang; angInit = true; }
   float dA = ang - lastAngle;
   lastAngle = ang;
+
+  float vRatio = v / NOMINAL_VEL;            // 1.0 = girando pra frente no nominal; <0 = reverso
+  double inc;
+  if (vRatio > FWD_THRESH) {
+    inc = (double)SAMPLE_RATE * dt * SCRATCH_PITCH;       // toca 1x pra frente
+  } else {
+    inc = (double)dA * gFramesPerRad * SCRATCH_PITCH;     // scratch (segue o prato)
+  }
   portENTER_CRITICAL(&posMux);
-  gScratchTarget += (double)dA * gFramesPerRad * SCRATCH_PITCH;
+  gScratchTarget += inc;
   portEXIT_CRITICAL(&posMux);
 
-  gSpeedFactor = v / NOMINAL_VEL;   // so p/ debug
+  gSpeedFactor = vRatio;   // so p/ debug
 
   // debug: v=velocidade  cut=crossfader cortando  mute=botao mute  ready=sample carregado
   static uint32_t tDbg = 0;
